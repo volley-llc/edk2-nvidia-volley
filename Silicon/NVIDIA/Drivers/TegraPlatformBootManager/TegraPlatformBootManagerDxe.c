@@ -841,6 +841,9 @@ RefreshNvBootOptions (
     return EFI_INVALID_PARAMETER;
   }
 
+  // Volley: keep boot options fixed (eMMC-only); skip auto-enumeration/updates.
+  return EFI_SUCCESS;
+
   if (PcdGet8 (PcdNewDeviceHierarchy)) {
     NvBootOptions = NULL;
     NvBootOptions = EfiBootManagerGetLoadOptions (

@@ -401,48 +401,6 @@ MemoryTest (
 }
 
 /**
-  This FILTER_FUNCTION checks if a handle corresponds to a PCI display device.
-**/
-STATIC
-BOOLEAN
-EFIAPI
-IsPciDisplay (
-  IN EFI_HANDLE    Handle,
-  IN CONST CHAR16  *ReportText
-  )
-{
-  EFI_STATUS           Status;
-  EFI_PCI_IO_PROTOCOL  *PciIo;
-  PCI_TYPE00           Pci;
-
-  Status = gBS->HandleProtocol (
-                  Handle,
-                  &gEfiPciIoProtocolGuid,
-                  (VOID **)&PciIo
-                  );
-  if (EFI_ERROR (Status)) {
-    //
-    // This is not an error worth reporting.
-    //
-    return FALSE;
-  }
-
-  Status = PciIo->Pci.Read (
-                        PciIo,
-                        EfiPciIoWidthUint32,
-                        0 /* Offset */,
-                        sizeof Pci / sizeof (UINT32),
-                        &Pci
-                        );
-  if (EFI_ERROR (Status)) {
-    DEBUG ((EFI_D_ERROR, "%a: %s: %r\n", __FUNCTION__, ReportText, Status));
-    return FALSE;
-  }
-
-  return IS_PCI_DISPLAY (&Pci);
-}
-
-/**
   This CALLBACK_FUNCTION attempts to connect a handle non-recursively, asking
   the matching driver to produce all first-level child handles.
 **/
@@ -468,65 +426,6 @@ Connect (
     __FUNCTION__,
     ReportText,
     Status
-    ));
-}
-
-/**
-  This CALLBACK_FUNCTION retrieves the EFI_DEVICE_PATH_PROTOCOL from the
-  handle, and adds it to ConOut and ErrOut.
-**/
-STATIC
-VOID
-EFIAPI
-AddOutput (
-  IN EFI_HANDLE    Handle,
-  IN CONST CHAR16  *ReportText
-  )
-{
-  EFI_STATUS                Status;
-  EFI_DEVICE_PATH_PROTOCOL  *DevicePath;
-
-  DevicePath = DevicePathFromHandle (Handle);
-  if (DevicePath == NULL) {
-    DEBUG ((
-      EFI_D_ERROR,
-      "%a: %s: handle %p: device path not found\n",
-      __FUNCTION__,
-      ReportText,
-      Handle
-      ));
-    return;
-  }
-
-  Status = EfiBootManagerUpdateConsoleVariable (ConOut, DevicePath, NULL);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((
-      EFI_D_ERROR,
-      "%a: %s: adding to ConOut: %r\n",
-      __FUNCTION__,
-      ReportText,
-      Status
-      ));
-    return;
-  }
-
-  Status = EfiBootManagerUpdateConsoleVariable (ErrOut, DevicePath, NULL);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((
-      EFI_D_ERROR,
-      "%a: %s: adding to ErrOut: %r\n",
-      __FUNCTION__,
-      ReportText,
-      Status
-      ));
-    return;
-  }
-
-  DEBUG ((
-    EFI_D_VERBOSE,
-    "%a: %s: added to ConOut and ErrOut\n",
-    __FUNCTION__,
-    ReportText
     ));
 }
 
@@ -1228,6 +1127,9 @@ PlatformRegisterConsoles (
 
   ASSERT (FixedPcdGet8 (PcdDefaultTerminalType) == 4);
 
+  // Headless: skip console registration.
+  return;
+
   Status = gBS->LocateHandleBuffer (
                   ByProtocol,
                   &gEfiSimpleTextOutProtocolGuid,
@@ -1336,25 +1238,11 @@ PlatformBootManagerBeforeConsole (
   //
   FilterAndProcess (&gEfiPciRootBridgeIoProtocolGuid, NULL, Connect);
 
-  //
-  // Find all display class PCI devices (using the handles from the previous
-  // step), and connect them non-recursively. This should produce a number of
-  // child handles with GOPs on them.
-  //
-  FilterAndProcess (&gEfiPciIoProtocolGuid, IsPciDisplay, Connect);
-
-  //
-  // Now add the device path of all handles with GOP on them to ConOut and
-  // ErrOut.
-  //
-  FilterAndProcess (&gEfiGraphicsOutputProtocolGuid, NULL, AddOutput);
+  // Headless: skip connecting display devices and GOP output.
 
   if (!IsSingleBootNeeded ()) {
     if (IsPlatformConfigurationNeeded ()) {
-      //
-      // Connect the rest of the devices.
-      //
-      EfiBootManagerConnectAll ();
+      // Headless: skip connecting all devices (avoid USB/display).
 
       //
       // Enumerate all possible boot options.
@@ -1378,9 +1266,7 @@ PlatformBootManagerBeforeConsole (
     }
   } else {
     //
-    // Connect the rest of the devices.
-    //
-    EfiBootManagerConnectAll ();
+    // Headless: skip connecting all devices (avoid USB/display).
 
     // Don't wait for timeout
     PcdSet16S (PcdPlatformBootTimeOut, 0);
