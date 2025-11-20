@@ -8,6 +8,7 @@
 **/
 
 #include <Uefi.h>
+#include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include <Library/PrintLib.h>
@@ -175,6 +176,23 @@ SetBootOrder (
   }
 
   Priority = 0;
+  //
+  // Reset priorities before assigning a new order.
+  //
+  for (BootPriorityIndex = 0; BootPriorityIndex < ARRAY_SIZE (mBootPriority); BootPriorityIndex++) {
+    mBootPriority[BootPriorityIndex].PriorityOrder = MAX_INT32;
+  }
+
+  //
+  // Force eMMC to be the highest priority regardless of DefaultBootPriority contents.
+  //
+  for (BootPriorityIndex = 0; BootPriorityIndex < ARRAY_SIZE (mBootPriority); BootPriorityIndex++) {
+    if (AsciiStrCmp (mBootPriority[BootPriorityIndex].OrderName, "emmc") == 0) {
+      mBootPriority[BootPriorityIndex].PriorityOrder = Priority++;
+      break;
+    }
+  }
+
   // Process the priority order
   Status = GetVariable2 (
              L"DefaultBootPriority",
@@ -208,8 +226,10 @@ SetBootOrder (
           (CompareMem (CurrentBootPriorityStr, mBootPriority[BootPriorityIndex].OrderName, CurrentBootPriorityLen) == 0))
       {
         DEBUG ((DEBUG_INFO, "Setting %a priority to %d\r\n", mBootPriority[BootPriorityIndex].OrderName, Priority));
-        mBootPriority[BootPriorityIndex].PriorityOrder = Priority;
-        Priority++;
+        if (mBootPriority[BootPriorityIndex].PriorityOrder == MAX_INT32) {
+          mBootPriority[BootPriorityIndex].PriorityOrder = Priority;
+          Priority++;
+        }
         break;
       }
     }
