@@ -14,6 +14,7 @@
 #include <IndustryStandard/Pci22.h>
 #include <Library/BootLogoLib.h>
 #include <Library/CapsuleLib.h>
+#include <Library/BaseLib.h>
 #include <Library/DevicePathLib.h>
 #include <Library/DxeServicesLib.h>
 #include <Library/HobLib.h>
@@ -51,53 +52,7 @@
 
 #define DP_NODE_LEN(Type)  { (UINT8)sizeof (Type), (UINT8)(sizeof (Type) >> 8) }
 
-#pragma pack (1)
-typedef struct {
-  USB_CLASS_DEVICE_PATH       Keyboard;
-  EFI_DEVICE_PATH_PROTOCOL    End;
-} PLATFORM_USB_KEYBOARD;
-#pragma pack ()
-
-STATIC PLATFORM_USB_KEYBOARD  mUsbKeyboard = {
-  //
-  // USB_CLASS_DEVICE_PATH Keyboard
-  //
-  {
-    {
-      MESSAGING_DEVICE_PATH, MSG_USB_CLASS_DP,
-      DP_NODE_LEN (USB_CLASS_DEVICE_PATH)
-    },
-    0xFFFF, // VendorId: any
-    0xFFFF, // ProductId: any
-    3,      // DeviceClass: HID
-    1,      // DeviceSubClass: boot
-    1       // DeviceProtocol: keyboard
-  },
-
-  //
-  // EFI_DEVICE_PATH_PROTOCOL End
-  //
-  {
-    END_DEVICE_PATH_TYPE, END_ENTIRE_DEVICE_PATH_SUBTYPE,
-    DP_NODE_LEN (EFI_DEVICE_PATH_PROTOCOL)
-  }
-};
-
 STATIC PLATFORM_CONFIGURATION_DATA  CurrentPlatformConfigData;
-
-STATIC
-BOOLEAN
-VolleyDeterministicBootEnabled (
-  VOID
-  )
-{
-  //
-  // Volley builds always enforce a deterministic boot path today.
-  // Keep this helper so the behavior can be centralized if the policy changes.
-  //
-  return TRUE;
-}
-
 /**
   Check if the handle satisfies a particular condition.
 
@@ -983,22 +938,8 @@ PlatformRegisterOptionsAndKeys (
 {
   EFI_STATUS                    Status;
   EFI_INPUT_KEY                 Enter;
-  EFI_INPUT_KEY                 F11;
-  EFI_INPUT_KEY                 Esc;
-  EFI_BOOT_MANAGER_LOAD_OPTION  BootOption;
 
   GetPlatformOptions ();
-
-  if (VolleyDeterministicBootEnabled ()) {
-    //
-    // Only honor the default continue key so stray input cannot interrupt boot.
-    //
-    Enter.ScanCode    = SCAN_NULL;
-    Enter.UnicodeChar = CHAR_CARRIAGE_RETURN;
-    Status            = EfiBootManagerRegisterContinueKeyOption (0, &Enter, NULL);
-    ASSERT_EFI_ERROR (Status);
-    return;
-  }
 
   //
   // Register ENTER as CONTINUE key
@@ -1007,40 +948,6 @@ PlatformRegisterOptionsAndKeys (
   Enter.UnicodeChar = CHAR_CARRIAGE_RETURN;
   Status            = EfiBootManagerRegisterContinueKeyOption (0, &Enter, NULL);
   ASSERT_EFI_ERROR (Status);
-
-  //
-  // Map ESC to Boot Manager Menu
-  //
-  Esc.ScanCode    = SCAN_ESC;
-  Esc.UnicodeChar = CHAR_NULL;
-  Status          = EfiBootManagerGetBootManagerMenu (&BootOption);
-  ASSERT_EFI_ERROR (Status);
-
-  Status = EfiBootManagerAddKeyOptionVariable (
-             NULL,
-             (UINT16)BootOption.OptionNumber,
-             0,
-             &Esc,
-             NULL
-             );
-  ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
-
-  //
-  // Map F11 to Boot Menu App (defined by PcdBootMenuAppFile)
-  //
-  F11.ScanCode    = SCAN_F11;
-  F11.UnicodeChar = CHAR_NULL;
-  Status          = EfiBootManagerGetBootMenuApp (&BootOption);
-  ASSERT_EFI_ERROR (Status);
-
-  Status = EfiBootManagerAddKeyOptionVariable (
-             NULL,
-             (UINT16)BootOption.OptionNumber,
-             0,
-             &F11,
-             NULL
-             );
-  ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
 }
 
 /**
@@ -1054,19 +961,17 @@ DisplaySystemAndHotkeyInformation (
   VOID
   )
 {
-  if (VolleyDeterministicBootEnabled ()) {
-    if (PcdGetBool (PcdTegraPrintInternalBanner)) {
-      Print (L"********** FOR NVIDIA INTERNAL USE ONLY **********\n");
-    }
-
-    Print (
-      L"%s UEFI firmware (version %s built on %s)\n\r",
-      (CHAR16 *)PcdGetPtr (PcdPlatformFamilyName),
-      (CHAR16 *)PcdGetPtr (PcdFirmwareVersionString),
-      (CHAR16 *)PcdGetPtr (PcdFirmwareDateTimeBuiltString)
-      );
-    return;
+  if (PcdGetBool (PcdTegraPrintInternalBanner)) {
+    Print (L"********** FOR NVIDIA INTERNAL USE ONLY **********\n");
   }
+
+  Print (
+    L"%s UEFI firmware (version %s built on %s)\n\r",
+    (CHAR16 *)PcdGetPtr (PcdPlatformFamilyName),
+    (CHAR16 *)PcdGetPtr (PcdFirmwareVersionString),
+    (CHAR16 *)PcdGetPtr (PcdFirmwareDateTimeBuiltString)
+    );
+  return;
 
   EFI_STATUS                     Status;
   EFI_GRAPHICS_OUTPUT_PROTOCOL   *GraphicsOutput;
@@ -1384,11 +1289,7 @@ PlatformRegisterConsoles (
                       &gEfiDevicePathProtocolGuid,
                       (VOID **)&Interface
                       );
-      if (!EFI_ERROR (Status)) {
-        if (!VolleyDeterministicBootEnabled ()) {
-          EfiBootManagerUpdateConsoleVariable (ConIn, Interface, NULL);
-        }
-      }
+      // Volley: skip adding additional ConIn devices to avoid firmware hotkeys.
     }
 
     gBS->FreePool (Handles);
@@ -1416,9 +1317,7 @@ PlatformBootManagerBeforeConsole (
   VOID
   )
 {
-  if (VolleyDeterministicBootEnabled ()) {
-    PcdSet16S (PcdPlatformBootTimeOut, 0);
-  }
+  PcdSet16S (PcdPlatformBootTimeOut, 0);
 
   //
   // Signal EndOfDxe PI Event
@@ -1468,18 +1367,6 @@ PlatformBootManagerBeforeConsole (
       PlatformRegisterOptionsAndKeys ();
 
       //
-      // Register UEFI Shell
-      //
-      if (!VolleyDeterministicBootEnabled ()) {
-        PlatformRegisterFvBootOption (
-          &gUefiShellFileGuid,
-          L"UEFI Shell",
-          LOAD_OPTION_ACTIVE,
-          LoadOptionTypeBoot
-          );
-      }
-
-      //
       // Set Boot Order
       //
       SetBootOrder ();
@@ -1509,15 +1396,7 @@ PlatformBootManagerBeforeConsole (
   //
   // Add the hardcoded short-form USB keyboard device path to ConIn.
   //
-  if (!VolleyDeterministicBootEnabled ()) {
-    EfiBootManagerUpdateConsoleVariable (
-      ConIn,
-      (EFI_DEVICE_PATH_PROTOCOL *)&mUsbKeyboard,
-      NULL
-      );
-  } else {
-    DEBUG ((DEBUG_INFO, "%a: skipping USB keyboard registration\n", __FUNCTION__));
-  }
+  DEBUG ((DEBUG_INFO, "%a: skipping USB keyboard registration\n", __FUNCTION__));
 
   //
   // Register all available consoles during intitial
@@ -1850,43 +1729,7 @@ PlatformBootManagerWaitCallback (
   UINT16  TimeoutRemain
   )
 {
-  if (VolleyDeterministicBootEnabled ()) {
-    return;
-  }
-
-  EFI_GRAPHICS_OUTPUT_BLT_PIXEL_UNION  Black;
-  EFI_GRAPHICS_OUTPUT_BLT_PIXEL_UNION  White;
-  UINT16                               Timeout;
-  EFI_STATUS                           Status;
-  EFI_STRING                           ProgressTitle;
-
-  ProgressTitle = NULL;
-  Timeout       = PcdGet16 (PcdPlatformBootTimeOut);
-  ProgressTitle = (EFI_STRING)PcdGetPtr (PcdBootManagerWaitMessage);
-
-  ASSERT (ProgressTitle != NULL);
-
-  //
-  // BootLogoUpdateProgress does not expect empty string
-  //
-  if ((ProgressTitle == NULL) || (StrLen (ProgressTitle) == 0)) {
-    ProgressTitle = L" ";
-  }
-
-  Black.Raw = 0x00000000;
-  White.Raw = 0x00FFFFFF;
-
-  Status = BootLogoUpdateProgress (
-             White.Pixel,
-             Black.Pixel,
-             ProgressTitle,
-             White.Pixel,
-             (Timeout - TimeoutRemain) * 100 / Timeout,
-             0
-             );
-  if (EFI_ERROR (Status)) {
-    Print (L".");
-  }
+  return;
 }
 
 /**
