@@ -76,8 +76,8 @@
   gNVIDIATokenSpaceGuid.PcdSystemFamilyType|L"Unknown"
   ## Type 3 Table (Chassis Information)
   gNVIDIATokenSpaceGuid.PcdType3Info|{ 0 }
-  gNVIDIATokenSpaceGuid.PcdType3Info.BootupState|ChassisStateUnknown
-  gNVIDIATokenSpaceGuid.PcdType3Info.PowerSupplyState|ChassisStateUnknown
+  gNVIDIATokenSpaceGuid.PcdType3Info.BootupState|ChassisStateSafe
+  gNVIDIATokenSpaceGuid.PcdType3Info.PowerSupplyState|ChassisStateSafe
   gNVIDIATokenSpaceGuid.PcdType3Info.ThermalState|ChassisStateUnknown
   gNVIDIATokenSpaceGuid.PcdType3Info.SecurityStatus|ChassisSecurityStatusUnknown
   gNVIDIATokenSpaceGuid.PcdType3Info.Height|1
@@ -156,6 +156,11 @@
   # Tegra Platform Configuration
   #
   Silicon/NVIDIA/Drivers/TegraPlatformInit/TegraPlatformInitDxe.inf
+
+  #
+  # Volley-specific overrides (keyboard suppression, etc)
+  #
+  Platform/NVIDIA/Library/PlatformOverridesLib/VolleyOverrides.inf
 
   #
   # Tegra UART driver
