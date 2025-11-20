@@ -85,6 +85,19 @@ STATIC PLATFORM_USB_KEYBOARD  mUsbKeyboard = {
 
 STATIC PLATFORM_CONFIGURATION_DATA  CurrentPlatformConfigData;
 
+STATIC
+BOOLEAN
+VolleyDeterministicBootEnabled (
+  VOID
+  )
+{
+  //
+  // Volley builds always enforce a deterministic boot path today.
+  // Keep this helper so the behavior can be centralized if the policy changes.
+  //
+  return TRUE;
+}
+
 /**
   Check if the handle satisfies a particular condition.
 
@@ -976,6 +989,17 @@ PlatformRegisterOptionsAndKeys (
 
   GetPlatformOptions ();
 
+  if (VolleyDeterministicBootEnabled ()) {
+    //
+    // Only honor the default continue key so stray input cannot interrupt boot.
+    //
+    Enter.ScanCode    = SCAN_NULL;
+    Enter.UnicodeChar = CHAR_CARRIAGE_RETURN;
+    Status            = EfiBootManagerRegisterContinueKeyOption (0, &Enter, NULL);
+    ASSERT_EFI_ERROR (Status);
+    return;
+  }
+
   //
   // Register ENTER as CONTINUE key
   //
@@ -1030,6 +1054,20 @@ DisplaySystemAndHotkeyInformation (
   VOID
   )
 {
+  if (VolleyDeterministicBootEnabled ()) {
+    if (PcdGetBool (PcdTegraPrintInternalBanner)) {
+      Print (L"********** FOR NVIDIA INTERNAL USE ONLY **********\n");
+    }
+
+    Print (
+      L"%s UEFI firmware (version %s built on %s)\n\r",
+      (CHAR16 *)PcdGetPtr (PcdPlatformFamilyName),
+      (CHAR16 *)PcdGetPtr (PcdFirmwareVersionString),
+      (CHAR16 *)PcdGetPtr (PcdFirmwareDateTimeBuiltString)
+      );
+    return;
+  }
+
   EFI_STATUS                     Status;
   EFI_GRAPHICS_OUTPUT_PROTOCOL   *GraphicsOutput;
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL  Black;
@@ -1347,7 +1385,9 @@ PlatformRegisterConsoles (
                       (VOID **)&Interface
                       );
       if (!EFI_ERROR (Status)) {
-        EfiBootManagerUpdateConsoleVariable (ConIn, Interface, NULL);
+        if (!VolleyDeterministicBootEnabled ()) {
+          EfiBootManagerUpdateConsoleVariable (ConIn, Interface, NULL);
+        }
       }
     }
 
@@ -1376,6 +1416,10 @@ PlatformBootManagerBeforeConsole (
   VOID
   )
 {
+  if (VolleyDeterministicBootEnabled ()) {
+    PcdSet16S (PcdPlatformBootTimeOut, 0);
+  }
+
   //
   // Signal EndOfDxe PI Event
   //
@@ -1426,12 +1470,14 @@ PlatformBootManagerBeforeConsole (
       //
       // Register UEFI Shell
       //
-      PlatformRegisterFvBootOption (
-        &gUefiShellFileGuid,
-        L"UEFI Shell",
-        LOAD_OPTION_ACTIVE,
-        LoadOptionTypeBoot
-        );
+      if (!VolleyDeterministicBootEnabled ()) {
+        PlatformRegisterFvBootOption (
+          &gUefiShellFileGuid,
+          L"UEFI Shell",
+          LOAD_OPTION_ACTIVE,
+          LoadOptionTypeBoot
+          );
+      }
 
       //
       // Set Boot Order
@@ -1463,11 +1509,15 @@ PlatformBootManagerBeforeConsole (
   //
   // Add the hardcoded short-form USB keyboard device path to ConIn.
   //
-  EfiBootManagerUpdateConsoleVariable (
-    ConIn,
-    (EFI_DEVICE_PATH_PROTOCOL *)&mUsbKeyboard,
-    NULL
-    );
+  if (!VolleyDeterministicBootEnabled ()) {
+    EfiBootManagerUpdateConsoleVariable (
+      ConIn,
+      (EFI_DEVICE_PATH_PROTOCOL *)&mUsbKeyboard,
+      NULL
+      );
+  } else {
+    DEBUG ((DEBUG_INFO, "%a: skipping USB keyboard registration\n", __FUNCTION__));
+  }
 
   //
   // Register all available consoles during intitial
@@ -1800,6 +1850,10 @@ PlatformBootManagerWaitCallback (
   UINT16  TimeoutRemain
   )
 {
+  if (VolleyDeterministicBootEnabled ()) {
+    return;
+  }
+
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL_UNION  Black;
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL_UNION  White;
   UINT16                               Timeout;
