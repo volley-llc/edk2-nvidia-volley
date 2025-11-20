@@ -55,7 +55,7 @@
 
 						gNVIDIATokenSpaceGuid {
 							DefaultBootPriority {
-								data = "usb,nvme,emmc,sd,ufs";
+								data = "emmc";
 								locked;
 							};
 						};
