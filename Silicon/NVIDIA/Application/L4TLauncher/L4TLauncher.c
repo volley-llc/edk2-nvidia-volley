@@ -1326,12 +1326,12 @@ ExtLinuxBoot(IN EFI_HANDLE ImageHandle, IN EFI_HANDLE DeviceHandle,
     if (!EFI_ERROR(Status) && LoadedImage != NULL)
     {
         EspDeviceHandle = LoadedImage->DeviceHandle;
-        DEBUG((DEBUG_INFO, "%a: ESP device handle acquired for DTB loading\n", __FUNCTION__));
+        ErrorPrint(L"%a: ESP device handle acquired for DTB loading\r\n", __FUNCTION__);
     }
     else
     {
-        DEBUG((DEBUG_WARN, "%a: Failed to get ESP device handle, will use rootfs device\n",
-               __FUNCTION__));
+        ErrorPrint(L"%a: Failed to get ESP device handle, will use rootfs device\r\n",
+                   __FUNCTION__);
         EspDeviceHandle = DeviceHandle;  // Fallback to rootfs device
     }
 
@@ -1391,15 +1391,14 @@ ExtLinuxBoot(IN EFI_HANDLE ImageHandle, IN EFI_HANDLE DeviceHandle,
         }
 
         // Try loading DTB from ESP device (where BOOTAA64.efi lives)
-        DEBUG((DEBUG_INFO, "%a: Attempting to load DTB from ESP: %s\n", __FUNCTION__,
-               BootOption->DtbPath));
+        ErrorPrint(L"%a: Attempting to load DTB from ESP: %s\r\n", __FUNCTION__,
+                   BootOption->DtbPath);
         Status = OpenAndReadFileToBuffer(EspDeviceHandle, BootOption->DtbPath, NULL, &NewFdtBase,
                                          &FdtSize);
         if (EFI_ERROR(Status))
         {
             // Fallback: try rootfs device
-            DEBUG((DEBUG_WARN, "%a: ESP load failed (%r), trying rootfs device\n", __FUNCTION__,
-                   Status));
+            ErrorPrint(L"%a: ESP load failed (%r), trying rootfs device\r\n", __FUNCTION__, Status);
             Status =
                 OpenAndReadFileToBuffer(DeviceHandle, BootOption->DtbPath, NULL, &NewFdtBase, &FdtSize);
         }
@@ -1412,7 +1411,7 @@ ExtLinuxBoot(IN EFI_HANDLE ImageHandle, IN EFI_HANDLE DeviceHandle,
         }
         else
         {
-            DEBUG((DEBUG_INFO, "%a: Successfully loaded DTB (%lu bytes)\n", __FUNCTION__, FdtSize));
+            ErrorPrint(L"%a: Successfully loaded DTB (%lu bytes)\r\n", __FUNCTION__, FdtSize);
         }
 
         ExpandedFdtBase = AllocatePages(EFI_SIZE_TO_PAGES(2 * fdt_totalsize(NewFdtBase)));
