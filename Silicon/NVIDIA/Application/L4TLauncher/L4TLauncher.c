@@ -1141,7 +1141,7 @@ BuildVolleyDirectBootConfig(EXTLINUX_BOOT_CONFIG* BootConfig)
     if (Option->DtbPath == NULL)
     {
         Status = AllocateBootOptionString(&Option->DtbPath,
-                                          L"\\EFI\\volley\\dtb\\tegra194-p2888-0001-p2822-0000.dtb");
+                                          L"EFI\\volley\\dtb\\tegra194-p2888-0001-p2822-0000.dtb");
     }
     if (EFI_ERROR(Status))
     {
@@ -1318,6 +1318,22 @@ ExtLinuxBoot(IN EFI_HANDLE ImageHandle, IN EFI_HANDLE DeviceHandle,
     EFI_DEVICE_PATH_PROTOCOL* KernelDevicePath = NULL;
     EFI_HANDLE KernelHandle = NULL;
     EFI_LOADED_IMAGE_PROTOCOL* ImageInfo;
+    EFI_LOADED_IMAGE_PROTOCOL* LoadedImage = NULL;
+    EFI_HANDLE EspDeviceHandle = NULL;
+
+    // Get ESP device handle (where L4TLauncher.efi was loaded from)
+    Status = gBS->HandleProtocol(ImageHandle, &gEfiLoadedImageProtocolGuid, (VOID**)&LoadedImage);
+    if (!EFI_ERROR(Status) && LoadedImage != NULL)
+    {
+        EspDeviceHandle = LoadedImage->DeviceHandle;
+        DEBUG((DEBUG_INFO, "%a: ESP device handle acquired for DTB loading\n", __FUNCTION__));
+    }
+    else
+    {
+        DEBUG((DEBUG_WARN, "%a: Failed to get ESP device handle, will use rootfs device\n",
+               __FUNCTION__));
+        EspDeviceHandle = DeviceHandle;  // Fallback to rootfs device
+    }
 
     // Process Args
     ArgSize = StrSize(BootOption->BootArgs) + MAX_CBOOTARG_SIZE;
@@ -1373,13 +1389,29 @@ ExtLinuxBoot(IN EFI_HANDLE ImageHandle, IN EFI_HANDLE DeviceHandle,
             OldFdtBase = NULL;
         }
 
-        Status =
-            OpenAndReadFileToBuffer(DeviceHandle, BootOption->DtbPath, NULL, &NewFdtBase, &FdtSize);
+        // Try loading DTB from ESP device (where BOOTAA64.efi lives)
+        DEBUG((DEBUG_INFO, "%a: Attempting to load DTB from ESP: %s\n", __FUNCTION__,
+               BootOption->DtbPath));
+        Status = OpenAndReadFileToBuffer(EspDeviceHandle, BootOption->DtbPath, NULL, &NewFdtBase,
+                                         &FdtSize);
+        if (EFI_ERROR(Status))
+        {
+            // Fallback: try rootfs device
+            DEBUG((DEBUG_WARN, "%a: ESP load failed (%r), trying rootfs device\n", __FUNCTION__,
+                   Status));
+            Status =
+                OpenAndReadFileToBuffer(DeviceHandle, BootOption->DtbPath, NULL, &NewFdtBase, &FdtSize);
+        }
+
         if (EFI_ERROR(Status))
         {
             ErrorPrint(L"%a:sds Failed to Authenticate %s (%r)\r\n", __FUNCTION__,
                        BootOption->DtbPath, Status);
             goto Exit;
+        }
+        else
+        {
+            DEBUG((DEBUG_INFO, "%a: Successfully loaded DTB (%lu bytes)\n", __FUNCTION__, FdtSize));
         }
 
         ExpandedFdtBase = AllocatePages(EFI_SIZE_TO_PAGES(2 * fdt_totalsize(NewFdtBase)));
