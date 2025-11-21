@@ -1127,8 +1127,8 @@ PlatformRegisterConsoles (
 
   ASSERT (FixedPcdGet8 (PcdDefaultTerminalType) == 4);
 
-  // Headless: skip console registration.
-  return;
+  // Headless: Register only serial console for output, skip display/USB
+  // Serial console is identified by NOT having GraphicsOutputProtocol
 
   Status = gBS->LocateHandleBuffer (
                   ByProtocol,
@@ -1139,63 +1139,39 @@ PlatformRegisterConsoles (
                   );
   if (!EFI_ERROR (Status)) {
     for (Count = 0; Count < NoHandles; Count++) {
+      // Check if this handle has GraphicsOutputProtocol (display device)
       Status = gBS->HandleProtocol (
                       Handles[Count],
                       &gEfiGraphicsOutputProtocolGuid,
                       (VOID **)&Gop
                       );
-      if (!EFI_ERROR (Status)) {
-        DEBUG ((
-          DEBUG_INFO,
-          "%a: GraphicsOutputProtocol supported on SimpleTextOutProtocol handle 0x%p\n",
-          __FUNCTION__,
-          Handles[Count]
-          ));
-      } else {
-        Gop = NULL;
-      }
 
-      Status = gBS->HandleProtocol (
-                      Handles[Count],
-                      &gEfiDevicePathProtocolGuid,
-                      (VOID **)&Interface
-                      );
-      if (!EFI_ERROR (Status)) {
-        DEBUG ((
-          DEBUG_INFO,
-          "%a: DevicePathProtocol supported on SimpleTextOutProtocol handle 0x%p\n",
-          __FUNCTION__,
-          Handles[Count]
-          ));
-        if ((InitialConsoleRegistration == TRUE) || (Gop != NULL)) {
+      if (EFI_ERROR (Status)) {
+        // No GOP = serial/UART console, register it for output
+        Status = gBS->HandleProtocol (
+                        Handles[Count],
+                        &gEfiDevicePathProtocolGuid,
+                        (VOID **)&Interface
+                        );
+        if (!EFI_ERROR (Status)) {
+          // Register serial console for output only
           EfiBootManagerUpdateConsoleVariable (ConOut, Interface, NULL);
           EfiBootManagerUpdateConsoleVariable (ErrOut, Interface, NULL);
+          DEBUG ((
+            DEBUG_INFO,
+            "%a: Registered serial console for output\n",
+            __FUNCTION__
+            ));
         }
       }
+      // Skip handles with GOP (display devices) - headless mode
     }
 
     gBS->FreePool (Handles);
   }
 
-  Status = gBS->LocateHandleBuffer (
-                  ByProtocol,
-                  &gEfiSimpleTextInProtocolGuid,
-                  NULL,
-                  &NoHandles,
-                  &Handles
-                  );
-  if (!EFI_ERROR (Status)) {
-    for (Count = 0; Count < NoHandles; Count++) {
-      Status = gBS->HandleProtocol (
-                      Handles[Count],
-                      &gEfiDevicePathProtocolGuid,
-                      (VOID **)&Interface
-                      );
-      // Volley: skip adding additional ConIn devices to avoid firmware hotkeys.
-    }
-
-    gBS->FreePool (Handles);
-  }
+  // Headless: Skip ConIn registration to prevent keyboard input
+  // Keyboard input is already suppressed by VolleyOverrides
 }
 
 //
