@@ -1380,8 +1380,9 @@ ExtLinuxBoot(IN EFI_HANDLE ImageHandle, IN EFI_HANDLE DeviceHandle,
     }
 
     // Reload fdt if needed
+    // Volley: Always prefer explicit DTB from ESP over ACPI or configuration table
     Status = EfiGetSystemConfigurationTable(&gEfiAcpiTableGuid, &AcpiBase);
-    if (EFI_ERROR(Status) && (BootOption->DtbPath != NULL))
+    if (BootOption->DtbPath != NULL)
     {
         Status = EfiGetSystemConfigurationTable(&gFdtTableGuid, &OldFdtBase);
         if (EFI_ERROR(Status))
