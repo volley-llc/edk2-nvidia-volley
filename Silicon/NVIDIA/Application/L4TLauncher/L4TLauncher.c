@@ -1141,7 +1141,7 @@ BuildVolleyDirectBootConfig(EXTLINUX_BOOT_CONFIG* BootConfig)
     if (Option->DtbPath == NULL)
     {
         Status = AllocateBootOptionString(&Option->DtbPath,
-                                          L"EFI\\volley\\dtb\\tegra194-p2888-0001-p2822-0000.dtb");
+                                          L"\\EFI\\volley\\dtb\\tegra194-p2888-0001-p2822-0000.dtb");
     }
     if (EFI_ERROR(Status))
     {
