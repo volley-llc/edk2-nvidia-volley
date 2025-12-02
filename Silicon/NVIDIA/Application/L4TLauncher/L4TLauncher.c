@@ -32,6 +32,7 @@ reserved.
 #include <Protocol/BlockIo.h>
 #include <Protocol/DiskIo.h>
 #include <Protocol/LoadFile2.h>
+#include <Protocol/SimpleFileSystem.h>
 
 #include <Guid/LinuxEfiInitrdMedia.h>
 #include <Protocol/Pkcs7Verify.h>
@@ -50,6 +51,7 @@ reserved.
 #include "L4TLauncher.h"
 #include "L4TRootfsValidation.h"
 
+// Kernel is at /boot/Image on eMMC APP partition
 #ifndef VOLLEY_DIRECT_KERNEL_PATH
 #define VOLLEY_DIRECT_KERNEL_PATH L"boot\\Image"
 #endif
@@ -178,6 +180,52 @@ LocatePartitionIndex(IN EFI_HANDLE DeviceHandle)
 
     ErrorPrint(L"%a: Unable to locate harddrive device path node\r\n", __FUNCTION__);
     return 0;
+}
+
+/**
+  Print the partition UUID for a device handle (for diagnostics)
+
+  @param[in]  DeviceHandle     The handle of partition.
+
+**/
+STATIC
+VOID
+EFIAPI
+PrintPartitionUuid(IN EFI_HANDLE DeviceHandle)
+{
+    EFI_DEVICE_PATH_PROTOCOL* DevicePath;
+    HARDDRIVE_DEVICE_PATH* HardDrivePath;
+    EFI_GUID* PartGuid;
+
+    if (DeviceHandle == 0)
+    {
+        ErrorPrint(L"  Partition: (null handle)\r\n");
+        return;
+    }
+
+    DevicePath = DevicePathFromHandle(DeviceHandle);
+    if (DevicePath == NULL)
+    {
+        ErrorPrint(L"  Partition: (no device path)\r\n");
+        return;
+    }
+
+    while (!IsDevicePathEndType(DevicePath))
+    {
+        if ((DevicePathType(DevicePath) == MEDIA_DEVICE_PATH) &&
+            (DevicePathSubType(DevicePath) == MEDIA_HARDDRIVE_DP))
+        {
+            HardDrivePath = (HARDDRIVE_DEVICE_PATH*)DevicePath;
+            PartGuid = (EFI_GUID*)&HardDrivePath->Signature;
+            ErrorPrint(L"  Partition %d UUID: %g\r\n",
+                       HardDrivePath->PartitionNumber, PartGuid);
+            return;
+        }
+
+        DevicePath = NextDevicePathNode(DevicePath);
+    }
+
+    ErrorPrint(L"  Partition: (not a harddrive partition)\r\n");
 }
 
 /**
@@ -1101,9 +1149,792 @@ AllocateBootOptionString(CHAR16** Target, CONST CHAR16* Source)
     return EFI_SUCCESS;
 }
 
+#if 1  // NVMe slot selection enabled
+//
+// ============================================================================
+// Volley Boot Mode Detection Functions
+// ============================================================================
+//
+
+/**
+  Parse a key=value configuration file and invoke callback for each pair.
+
+  Handles:
+  - Lines starting with '#' (comments, ignored)
+  - Empty lines (ignored)
+  - Both \r\n (Windows) and \n (Unix) line endings
+  - No spaces around '=' sign expected
+
+  @param[in]  Buffer      ASCII file content
+  @param[in]  BufferSize  Size of buffer in bytes
+  @param[in]  Callback    Function to call for each key=value pair
+  @param[in]  Context     User context passed to callback
+
+  @retval EFI_SUCCESS     File parsed successfully
+**/
 STATIC
 EFI_STATUS
-BuildVolleyDirectBootConfig(EXTLINUX_BOOT_CONFIG* BootConfig)
+ParseKeyValueFile(
+    IN  CONST CHAR8     *Buffer,
+    IN  UINTN           BufferSize,
+    IN  EFI_STATUS      (*Callback)(CONST CHAR8 *Key, CONST CHAR8 *Value, VOID *Context),
+    IN  VOID            *Context
+)
+{
+    CONST CHAR8 *LineStart;
+    CONST CHAR8 *LineEnd;
+    CONST CHAR8 *BufferEnd;
+    CONST CHAR8 *Equals;
+    CHAR8       Key[64];
+    CHAR8       Value[256];
+    UINTN       KeyLen;
+    UINTN       ValueLen;
+    EFI_STATUS  Status;
+
+    if (Buffer == NULL || BufferSize == 0 || Callback == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    BufferEnd = Buffer + BufferSize;
+    LineStart = Buffer;
+
+    while (LineStart < BufferEnd) {
+        // Find end of line
+        LineEnd = LineStart;
+        while (LineEnd < BufferEnd && *LineEnd != '\n' && *LineEnd != '\r') {
+            LineEnd++;
+        }
+
+        // Skip empty lines and comments
+        if (LineEnd > LineStart && *LineStart != '#') {
+            // Find '=' separator
+            Equals = LineStart;
+            while (Equals < LineEnd && *Equals != '=') {
+                Equals++;
+            }
+
+            if (Equals < LineEnd && Equals > LineStart) {
+                // Extract key
+                KeyLen = Equals - LineStart;
+                if (KeyLen >= sizeof(Key)) {
+                    KeyLen = sizeof(Key) - 1;
+                }
+                CopyMem(Key, LineStart, KeyLen);
+                Key[KeyLen] = '\0';
+
+                // Extract value
+                ValueLen = LineEnd - (Equals + 1);
+                if (ValueLen >= sizeof(Value)) {
+                    ValueLen = sizeof(Value) - 1;
+                }
+                CopyMem(Value, Equals + 1, ValueLen);
+                Value[ValueLen] = '\0';
+
+                // Call callback
+                Status = Callback(Key, Value, Context);
+                if (EFI_ERROR(Status)) {
+                    return Status;
+                }
+            }
+        }
+
+        // Move to next line
+        LineStart = LineEnd;
+        if (LineStart < BufferEnd && *LineStart == '\r') {
+            LineStart++;
+        }
+        if (LineStart < BufferEnd && *LineStart == '\n') {
+            LineStart++;
+        }
+    }
+
+    return EFI_SUCCESS;
+}
+
+/**
+  Callback for parsing boot_config.txt - extracts expected_nvme_uuid
+**/
+STATIC
+EFI_STATUS
+BootConfigCallback(
+    IN  CONST CHAR8     *Key,
+    IN  CONST CHAR8     *Value,
+    IN  VOID            *Context
+)
+{
+    VOLLEY_BOOT_CONFIG  *Config = (VOLLEY_BOOT_CONFIG *)Context;
+    RETURN_STATUS       ReturnStatus;
+    CHAR16              UuidStr[64];
+
+    if (AsciiStrCmp(Key, "expected_nvme_uuid") == 0) {
+        // Convert ASCII to Unicode for GUID parsing
+        AsciiStrToUnicodeStrS(Value, UuidStr, sizeof(UuidStr) / sizeof(CHAR16));
+
+        // Parse the GUID string
+        ReturnStatus = StrToGuid(UuidStr, &Config->ExpectedNvmeUuid);
+        if (!RETURN_ERROR(ReturnStatus)) {
+            Config->Valid = TRUE;
+            DEBUG((DEBUG_INFO, "Volley: Parsed expected_nvme_uuid: %g\n", &Config->ExpectedNvmeUuid));
+        } else {
+            DEBUG((DEBUG_ERROR, "Volley: Failed to parse UUID: %a\n", Value));
+        }
+    }
+
+    return EFI_SUCCESS;
+}
+
+/**
+  Read and parse /boot_config.txt from eMMC ESP partition.
+
+  @param[in]  EspHandle   Handle to ESP partition
+  @param[out] Config      Parsed configuration
+
+  @retval EFI_SUCCESS     Configuration read and parsed successfully
+  @retval EFI_NOT_FOUND   File not found
+  @retval Other           Read or parse error
+**/
+STATIC
+EFI_STATUS
+ReadVolleyBootConfig(
+    IN  EFI_HANDLE          EspHandle,
+    OUT VOLLEY_BOOT_CONFIG  *Config
+)
+{
+    EFI_STATUS  Status;
+    VOID        *FileData = NULL;
+    UINT64      FileSize = 0;
+
+    if (Config == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    ZeroMem(Config, sizeof(VOLLEY_BOOT_CONFIG));
+    Config->Valid = FALSE;
+
+    // Read boot_config.txt from ESP
+    Status = OpenAndReadUntrustedFileToBuffer(
+        EspHandle,
+        VOLLEY_BOOT_CONFIG_PATH,
+        NULL,
+        &FileData,
+        &FileSize
+    );
+
+    if (EFI_ERROR(Status)) {
+        DEBUG((DEBUG_INFO, "Volley: boot_config.txt not found or unreadable: %r\n", Status));
+        return Status;
+    }
+
+    if (FileData == NULL || FileSize == 0) {
+        DEBUG((DEBUG_INFO, "Volley: boot_config.txt is empty\n"));
+        return EFI_NOT_FOUND;
+    }
+
+    // Parse the file
+    Status = ParseKeyValueFile((CHAR8 *)FileData, (UINTN)FileSize, BootConfigCallback, Config);
+
+    FreePool(FileData);
+
+    if (!Config->Valid) {
+        DEBUG((DEBUG_INFO, "Volley: boot_config.txt missing expected_nvme_uuid\n"));
+        return EFI_NOT_FOUND;
+    }
+
+    return EFI_SUCCESS;
+}
+
+/**
+  Find NVMe disk device by enumerating Block I/O protocol handles.
+
+  @param[out] BlockIo       Block I/O protocol for NVMe disk
+  @param[out] DeviceHandle  Handle for NVMe device
+
+  @retval EFI_SUCCESS       NVMe device found
+  @retval EFI_NOT_FOUND     No NVMe device present
+**/
+STATIC
+EFI_STATUS
+FindNvmeDevice(
+    OUT EFI_BLOCK_IO_PROTOCOL   **BlockIo,
+    OUT EFI_HANDLE              *DeviceHandle
+)
+{
+    EFI_STATUS                  Status;
+    UINTN                       NumHandles;
+    EFI_HANDLE                  *HandleBuffer = NULL;
+    UINTN                       Index;
+    EFI_BLOCK_IO_PROTOCOL       *TempBlockIo;
+    EFI_DEVICE_PATH_PROTOCOL    *DevicePath;
+    EFI_DEVICE_PATH_PROTOCOL    *Node;
+
+    if (BlockIo == NULL || DeviceHandle == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    *BlockIo = NULL;
+    *DeviceHandle = NULL;
+
+    // Get all Block I/O handles
+    Status = gBS->LocateHandleBuffer(
+        ByProtocol,
+        &gEfiBlockIoProtocolGuid,
+        NULL,
+        &NumHandles,
+        &HandleBuffer
+    );
+
+    if (EFI_ERROR(Status)) {
+        DEBUG((DEBUG_INFO, "Volley: No Block I/O devices found\n"));
+        return Status;
+    }
+
+    DEBUG((DEBUG_INFO, "Volley: Found %u Block I/O handles\n", NumHandles));
+
+    for (Index = 0; Index < NumHandles; Index++) {
+        // Get Block I/O protocol
+        Status = gBS->HandleProtocol(
+            HandleBuffer[Index],
+            &gEfiBlockIoProtocolGuid,
+            (VOID **)&TempBlockIo
+        );
+        if (EFI_ERROR(Status)) {
+            continue;
+        }
+
+        // Skip partitions - we want the whole disk
+        if (TempBlockIo->Media->LogicalPartition) {
+            continue;
+        }
+
+        // Get device path
+        Status = gBS->HandleProtocol(
+            HandleBuffer[Index],
+            &gEfiDevicePathProtocolGuid,
+            (VOID **)&DevicePath
+        );
+        if (EFI_ERROR(Status)) {
+            continue;
+        }
+
+        // Walk device path looking for NVMe node
+        Node = DevicePath;
+        while (!IsDevicePathEnd(Node)) {
+            if (DevicePathType(Node) == MESSAGING_DEVICE_PATH &&
+                DevicePathSubType(Node) == MSG_NVME_NAMESPACE_DP) {
+                // Found NVMe device
+                DEBUG((DEBUG_INFO, "Volley: Found NVMe device at handle index %u\n", Index));
+                *BlockIo = TempBlockIo;
+                *DeviceHandle = HandleBuffer[Index];
+                FreePool(HandleBuffer);
+                return EFI_SUCCESS;
+            }
+            Node = NextDevicePathNode(Node);
+        }
+    }
+
+    FreePool(HandleBuffer);
+    DEBUG((DEBUG_INFO, "Volley: No NVMe device found\n"));
+    return EFI_NOT_FOUND;
+}
+
+/**
+  Read GPT header from device and extract DiskGUID.
+
+  @param[in]  BlockIo     Block I/O protocol for device
+  @param[out] DiskGuid    The GPT Disk GUID
+
+  @retval EFI_SUCCESS         GUID read successfully
+  @retval EFI_VOLUME_CORRUPTED Invalid GPT header
+**/
+STATIC
+EFI_STATUS
+ReadNvmeDiskGuid(
+    IN  EFI_BLOCK_IO_PROTOCOL   *BlockIo,
+    OUT EFI_GUID                *DiskGuid
+)
+{
+    EFI_STATUS                  Status;
+    VOID                        *Buffer = NULL;
+    UINT32                      BlockSize;
+    EFI_PARTITION_TABLE_HEADER  *GptHeader;
+
+    if (BlockIo == NULL || DiskGuid == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    BlockSize = BlockIo->Media->BlockSize;
+
+    // Allocate buffer for GPT header (LBA 1)
+    Buffer = AllocatePool(BlockSize);
+    if (Buffer == NULL) {
+        return EFI_OUT_OF_RESOURCES;
+    }
+
+    // Read LBA 1 (primary GPT header)
+    Status = BlockIo->ReadBlocks(
+        BlockIo,
+        BlockIo->Media->MediaId,
+        1,  // GPT header is at LBA 1
+        BlockSize,
+        Buffer
+    );
+
+    if (EFI_ERROR(Status)) {
+        DEBUG((DEBUG_ERROR, "Volley: Failed to read GPT header: %r\n", Status));
+        FreePool(Buffer);
+        return Status;
+    }
+
+    GptHeader = (EFI_PARTITION_TABLE_HEADER *)Buffer;
+
+    // Validate GPT signature
+    if (GptHeader->Header.Signature != EFI_PTAB_HEADER_ID) {
+        DEBUG((DEBUG_ERROR, "Volley: Invalid GPT signature\n"));
+        FreePool(Buffer);
+        return EFI_VOLUME_CORRUPTED;
+    }
+
+    // Extract DiskGUID
+    CopyGuid(DiskGuid, &GptHeader->DiskGUID);
+    DEBUG((DEBUG_INFO, "Volley: NVMe Disk GUID: %g\n", DiskGuid));
+
+    FreePool(Buffer);
+    return EFI_SUCCESS;
+}
+
+/**
+  Find NVMe partition handle by partition number.
+
+  @param[in]  NvmeDeviceHandle  Handle to parent NVMe device
+  @param[in]  PartitionNumber   1 for p1, 2 for p2
+  @param[out] PartitionHandle   Handle for the partition
+
+  @retval EFI_SUCCESS       Partition found
+  @retval EFI_NOT_FOUND     Partition not found
+**/
+STATIC
+EFI_STATUS
+FindNvmePartitionByNumber(
+    IN  EFI_HANDLE      NvmeDeviceHandle,
+    IN  UINT32          PartitionNumber,
+    OUT EFI_HANDLE      *PartitionHandle
+)
+{
+    EFI_STATUS                  Status;
+    UINTN                       NumHandles;
+    EFI_HANDLE                  *HandleBuffer = NULL;
+    UINTN                       Index;
+    EFI_PARTITION_INFO_PROTOCOL *PartitionInfo;
+    EFI_DEVICE_PATH_PROTOCOL    *ParentPath;
+    EFI_DEVICE_PATH_PROTOCOL    *ChildPath;
+    EFI_DEVICE_PATH_PROTOCOL    *Node;
+    HARDDRIVE_DEVICE_PATH       *HdPath;
+    UINTN                       ParentPathSize;
+
+    if (PartitionHandle == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    *PartitionHandle = NULL;
+
+    // Get parent device path
+    Status = gBS->HandleProtocol(
+        NvmeDeviceHandle,
+        &gEfiDevicePathProtocolGuid,
+        (VOID **)&ParentPath
+    );
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
+    ParentPathSize = GetDevicePathSize(ParentPath) - sizeof(EFI_DEVICE_PATH_PROTOCOL);
+
+    // Get all partition info handles
+    Status = gBS->LocateHandleBuffer(
+        ByProtocol,
+        &gEfiPartitionInfoProtocolGuid,
+        NULL,
+        &NumHandles,
+        &HandleBuffer
+    );
+
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
+
+    for (Index = 0; Index < NumHandles; Index++) {
+        // Get partition info
+        Status = gBS->HandleProtocol(
+            HandleBuffer[Index],
+            &gEfiPartitionInfoProtocolGuid,
+            (VOID **)&PartitionInfo
+        );
+        if (EFI_ERROR(Status)) {
+            continue;
+        }
+
+        // Check if it's a GPT partition
+        if (PartitionInfo->Type != PARTITION_TYPE_GPT) {
+            continue;
+        }
+
+        // Get child device path
+        Status = gBS->HandleProtocol(
+            HandleBuffer[Index],
+            &gEfiDevicePathProtocolGuid,
+            (VOID **)&ChildPath
+        );
+        if (EFI_ERROR(Status)) {
+            continue;
+        }
+
+        // Check if child is under parent (device path starts with parent path)
+        if (CompareMem(ChildPath, ParentPath, ParentPathSize) != 0) {
+            continue;
+        }
+
+        // Check partition number using the hard drive device path
+        Node = ChildPath;
+        while (!IsDevicePathEnd(Node)) {
+            if (DevicePathType(Node) == MEDIA_DEVICE_PATH &&
+                DevicePathSubType(Node) == MEDIA_HARDDRIVE_DP) {
+                HdPath = (HARDDRIVE_DEVICE_PATH *)Node;
+                if (HdPath->PartitionNumber == PartitionNumber) {
+                    DEBUG((DEBUG_INFO, "Volley: Found NVMe partition %u\n", PartitionNumber));
+                    *PartitionHandle = HandleBuffer[Index];
+                    FreePool(HandleBuffer);
+                    return EFI_SUCCESS;
+                }
+            }
+            Node = NextDevicePathNode(Node);
+        }
+    }
+
+    FreePool(HandleBuffer);
+    DEBUG((DEBUG_INFO, "Volley: NVMe partition %u not found\n", PartitionNumber));
+    return EFI_NOT_FOUND;
+}
+
+/**
+  Callback for parsing slot_meta.txt - extracts update_counter and valid flag
+**/
+STATIC
+EFI_STATUS
+SlotMetaCallback(
+    IN  CONST CHAR8     *Key,
+    IN  CONST CHAR8     *Value,
+    IN  VOID            *Context
+)
+{
+    VOLLEY_SLOT_META *SlotMeta = (VOLLEY_SLOT_META *)Context;
+
+    if (AsciiStrCmp(Key, "update_counter") == 0) {
+        SlotMeta->UpdateCounter = (UINT32)AsciiStrDecimalToUintn(Value);
+        DEBUG((DEBUG_INFO, "Volley: Parsed update_counter=%u\n", SlotMeta->UpdateCounter));
+    } else if (AsciiStrCmp(Key, "valid") == 0) {
+        if (AsciiStrCmp(Value, "1") == 0) {
+            SlotMeta->Valid = TRUE;
+            DEBUG((DEBUG_INFO, "Volley: Slot is valid\n"));
+        }
+    }
+
+    return EFI_SUCCESS;
+}
+
+/**
+  Read and parse /slot_meta.txt from NVMe partition.
+
+  @param[in]  PartitionHandle   Handle to FAT32 partition
+  @param[out] SlotMeta          Parsed slot metadata
+
+  @retval EFI_SUCCESS       Metadata read and parsed successfully
+  @retval EFI_NOT_FOUND     File not found or slot invalid
+**/
+STATIC
+EFI_STATUS
+ReadSlotMetadata(
+    IN  EFI_HANDLE          PartitionHandle,
+    OUT VOLLEY_SLOT_META    *SlotMeta
+)
+{
+    EFI_STATUS  Status;
+    VOID        *FileData = NULL;
+    UINT64      FileSize = 0;
+
+    if (SlotMeta == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    ZeroMem(SlotMeta, sizeof(VOLLEY_SLOT_META));
+    SlotMeta->Valid = FALSE;
+    SlotMeta->UpdateCounter = 0;
+
+    // Read slot_meta.txt from partition
+    Status = OpenAndReadUntrustedFileToBuffer(
+        PartitionHandle,
+        VOLLEY_SLOT_META_PATH,
+        NULL,
+        &FileData,
+        &FileSize
+    );
+
+    if (EFI_ERROR(Status)) {
+        DEBUG((DEBUG_INFO, "Volley: slot_meta.txt not found: %r\n", Status));
+        return Status;
+    }
+
+    if (FileData == NULL || FileSize == 0) {
+        DEBUG((DEBUG_INFO, "Volley: slot_meta.txt is empty\n"));
+        return EFI_NOT_FOUND;
+    }
+
+    // Parse the file
+    Status = ParseKeyValueFile((CHAR8 *)FileData, (UINTN)FileSize, SlotMetaCallback, SlotMeta);
+
+    FreePool(FileData);
+
+    if (!SlotMeta->Valid) {
+        DEBUG((DEBUG_INFO, "Volley: Slot marked as invalid (valid != 1)\n"));
+    }
+
+    return EFI_SUCCESS;
+}
+
+/**
+  Select the best boot slot based on metadata.
+
+  @param[in]  SlotA         Metadata for slot A
+  @param[in]  SlotB         Metadata for slot B
+  @param[out] SelectedMode  Selected boot mode
+
+  @retval EFI_SUCCESS       Slot selected successfully
+  @retval EFI_NOT_FOUND     Both slots are invalid
+**/
+STATIC
+EFI_STATUS
+SelectBestSlot(
+    IN  CONST VOLLEY_SLOT_META  *SlotA,
+    IN  CONST VOLLEY_SLOT_META  *SlotB,
+    OUT VOLLEY_BOOT_MODE        *SelectedMode
+)
+{
+    if (SelectedMode == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    if (SlotA->Valid && SlotB->Valid) {
+        // Both valid - select higher update_counter
+        if (SlotA->UpdateCounter >= SlotB->UpdateCounter) {
+            DEBUG((DEBUG_INFO, "Volley: Selecting Slot A (counter %u >= %u)\n",
+                   SlotA->UpdateCounter, SlotB->UpdateCounter));
+            *SelectedMode = VOLLEY_MODE_SLOT_A;
+        } else {
+            DEBUG((DEBUG_INFO, "Volley: Selecting Slot B (counter %u > %u)\n",
+                   SlotB->UpdateCounter, SlotA->UpdateCounter));
+            *SelectedMode = VOLLEY_MODE_SLOT_B;
+        }
+        return EFI_SUCCESS;
+    } else if (SlotA->Valid) {
+        DEBUG((DEBUG_INFO, "Volley: Only Slot A is valid\n"));
+        *SelectedMode = VOLLEY_MODE_SLOT_A;
+        return EFI_SUCCESS;
+    } else if (SlotB->Valid) {
+        DEBUG((DEBUG_INFO, "Volley: Only Slot B is valid\n"));
+        *SelectedMode = VOLLEY_MODE_SLOT_B;
+        return EFI_SUCCESS;
+    }
+
+    // Neither slot is valid
+    DEBUG((DEBUG_INFO, "Volley: Both slots invalid, will use install mode\n"));
+    return EFI_NOT_FOUND;
+}
+
+/**
+  Main orchestrator - determine Volley boot mode.
+
+  Determines boot mode and which partition to load kernel from.
+
+  Algorithm:
+  1. Read boot_config.txt from eMMC APP partition
+  2. Find NVMe device
+  3. Read NVMe GPT DiskGUID
+  4. Compare UUIDs - if mismatch, install mode
+  5. If match, read slot metadata and select best slot
+  6. Verify selected slot's partition GUID matches expected PARTUUID
+
+  @param[in]  EspHandle     Handle to eMMC ESP partition (where L4TLauncher lives)
+  @param[in]  EmmcAppHandle Handle to eMMC APP partition (for install mode kernel)
+  @param[out] BootMode      Determined boot mode
+  @param[out] RootFsHandle  Handle to partition to load kernel from
+
+  @retval EFI_SUCCESS       Boot mode determined successfully
+**/
+STATIC
+EFI_STATUS
+VolleyDetermineBootMode(
+    IN  EFI_HANDLE          EspHandle,
+    IN  EFI_HANDLE          EmmcAppHandle,
+    OUT VOLLEY_BOOT_MODE    *BootMode,
+    OUT EFI_HANDLE          *RootFsHandle
+)
+{
+    EFI_STATUS                  Status;
+    VOLLEY_BOOT_CONFIG          BootConfig;
+    EFI_BLOCK_IO_PROTOCOL       *NvmeBlockIo = NULL;
+    EFI_HANDLE                  NvmeDeviceHandle = NULL;
+    EFI_GUID                    NvmeDiskGuid;
+    EFI_HANDLE                  SlotAHandle = NULL;
+    EFI_HANDLE                  SlotBHandle = NULL;
+    VOLLEY_SLOT_META            SlotAMeta;
+    VOLLEY_SLOT_META            SlotBMeta;
+    VOID                        *Fs = NULL;
+    EFI_PARTITION_INFO_PROTOCOL *PartInfo = NULL;
+    EFI_GUID                    ExpectedGuid;
+    EFI_HANDLE                  SelectedHandle = NULL;
+
+    if (BootMode == NULL || RootFsHandle == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    ErrorPrint(L"Volley: Determining boot mode...\r\n");
+
+    // Step 1: Read boot_config.txt from eMMC APP partition
+    Status = ReadVolleyBootConfig(EmmcAppHandle, &BootConfig);
+    if (EFI_ERROR(Status) || !BootConfig.Valid) {
+        ErrorPrint(L"Volley: boot_config.txt missing or invalid\r\n");
+        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_EMMC_APP_PARTUUID L")\r\n");
+        *BootMode = VOLLEY_MODE_INSTALL;
+        *RootFsHandle = EmmcAppHandle;
+        return EFI_SUCCESS;
+    }
+
+    // Step 2: Find NVMe device
+    Status = FindNvmeDevice(&NvmeBlockIo, &NvmeDeviceHandle);
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: No NVMe device found\r\n");
+        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_EMMC_APP_PARTUUID L")\r\n");
+        *BootMode = VOLLEY_MODE_INSTALL;
+        *RootFsHandle = EmmcAppHandle;
+        return EFI_SUCCESS;
+    }
+
+    // Step 3: Read NVMe GPT DiskGUID
+    Status = ReadNvmeDiskGuid(NvmeBlockIo, &NvmeDiskGuid);
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: Failed to read NVMe GPT header\r\n");
+        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_EMMC_APP_PARTUUID L")\r\n");
+        *BootMode = VOLLEY_MODE_INSTALL;
+        *RootFsHandle = EmmcAppHandle;
+        return EFI_SUCCESS;
+    }
+
+    // Step 4: Compare UUIDs
+    if (!CompareGuid(&NvmeDiskGuid, &BootConfig.ExpectedNvmeUuid)) {
+        ErrorPrint(L"Volley: NVMe UUID mismatch\r\n");
+        ErrorPrint(L"  Expected: %g\r\n", &BootConfig.ExpectedNvmeUuid);
+        ErrorPrint(L"  Actual:   %g\r\n", &NvmeDiskGuid);
+        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_EMMC_APP_PARTUUID L")\r\n");
+        *BootMode = VOLLEY_MODE_INSTALL;
+        *RootFsHandle = EmmcAppHandle;
+        return EFI_SUCCESS;
+    }
+
+    ErrorPrint(L"Volley: NVMe UUID matches (%g)\r\n", &NvmeDiskGuid);
+
+    // Step 5: Find partition handles for slots A and B
+    // Check for mountable filesystem (FAT) before reading slot_meta.txt
+    Status = FindNvmePartitionByNumber(NvmeDeviceHandle, 1, &SlotAHandle);
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: Slot A (p1) partition not found\r\n");
+        ZeroMem(&SlotAMeta, sizeof(SlotAMeta));
+    } else {
+        // Check for mountable filesystem before attempting to read
+        Status = gBS->HandleProtocol(SlotAHandle, &gEfiSimpleFileSystemProtocolGuid, &Fs);
+        if (EFI_ERROR(Status)) {
+            ErrorPrint(L"Volley: Slot A has no mountable filesystem (ext4?)\r\n");
+            ZeroMem(&SlotAMeta, sizeof(SlotAMeta));
+        } else {
+            ReadSlotMetadata(SlotAHandle, &SlotAMeta);
+            ErrorPrint(L"Volley: Slot A: valid=%d update_counter=%u\r\n",
+                       SlotAMeta.Valid, SlotAMeta.UpdateCounter);
+        }
+    }
+
+    Status = FindNvmePartitionByNumber(NvmeDeviceHandle, 2, &SlotBHandle);
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: Slot B (p2) partition not found\r\n");
+        ZeroMem(&SlotBMeta, sizeof(SlotBMeta));
+    } else {
+        // Check for mountable filesystem before attempting to read
+        Status = gBS->HandleProtocol(SlotBHandle, &gEfiSimpleFileSystemProtocolGuid, &Fs);
+        if (EFI_ERROR(Status)) {
+            ErrorPrint(L"Volley: Slot B has no mountable filesystem (ext4?)\r\n");
+            ZeroMem(&SlotBMeta, sizeof(SlotBMeta));
+        } else {
+            ReadSlotMetadata(SlotBHandle, &SlotBMeta);
+            ErrorPrint(L"Volley: Slot B: valid=%d update_counter=%u\r\n",
+                       SlotBMeta.Valid, SlotBMeta.UpdateCounter);
+        }
+    }
+
+    // Step 6: Select best slot
+    Status = SelectBestSlot(&SlotAMeta, &SlotBMeta, BootMode);
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: Both slots invalid\r\n");
+        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_EMMC_APP_PARTUUID L")\r\n");
+        *BootMode = VOLLEY_MODE_INSTALL;
+        *RootFsHandle = EmmcAppHandle;
+        return EFI_SUCCESS;
+    }
+
+    // Step 7: Verify partition GUID matches expected PARTUUID
+    if (*BootMode == VOLLEY_MODE_SLOT_A) {
+        SelectedHandle = SlotAHandle;
+        StrToGuid(VOLLEY_NVME_SLOT_A_PARTUUID, &ExpectedGuid);
+    } else {
+        SelectedHandle = SlotBHandle;
+        StrToGuid(VOLLEY_NVME_SLOT_B_PARTUUID, &ExpectedGuid);
+    }
+
+    // Get actual partition GUID from GPT entry
+    Status = gBS->HandleProtocol(SelectedHandle, &gEfiPartitionInfoProtocolGuid, (VOID**)&PartInfo);
+    if (!EFI_ERROR(Status) && PartInfo->Type == PARTITION_TYPE_GPT) {
+        if (!CompareGuid(&PartInfo->Info.Gpt.UniquePartitionGUID, &ExpectedGuid)) {
+            ErrorPrint(L"Volley: PARTUUID mismatch!\r\n");
+            ErrorPrint(L"  Expected: %g\r\n", &ExpectedGuid);
+            ErrorPrint(L"  Actual:   %g\r\n", &PartInfo->Info.Gpt.UniquePartitionGUID);
+            ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_EMMC_APP_PARTUUID L")\r\n");
+            *BootMode = VOLLEY_MODE_INSTALL;
+            *RootFsHandle = EmmcAppHandle;
+            return EFI_SUCCESS;
+        }
+    }
+
+    // PARTUUID verified - set RootFsHandle to selected slot
+    *RootFsHandle = SelectedHandle;
+
+    // Log selected slot
+    if (*BootMode == VOLLEY_MODE_SLOT_A) {
+        ErrorPrint(L"Volley: Selected Slot A (PARTUUID=" VOLLEY_NVME_SLOT_A_PARTUUID L")\r\n");
+    } else {
+        ErrorPrint(L"Volley: Selected Slot B (PARTUUID=" VOLLEY_NVME_SLOT_B_PARTUUID L")\r\n");
+    }
+
+    return EFI_SUCCESS;
+}
+
+//
+// ============================================================================
+// End of Volley Boot Mode Detection Functions
+// ============================================================================
+//
+#endif  // NVMe slot selection enabled
+
+STATIC
+EFI_STATUS
+BuildVolleyBootConfigForMode(
+    IN  VOLLEY_BOOT_MODE        Mode,
+    OUT EXTLINUX_BOOT_CONFIG    *BootConfig
+)
 {
     EFI_STATUS Status;
     EXTLINUX_BOOT_OPTION* Option;
@@ -1154,11 +1985,39 @@ BuildVolleyDirectBootConfig(EXTLINUX_BOOT_CONFIG* BootConfig)
         goto Error;
     }
 
-    Status = AllocateBootOptionString(&Option->BootArgs, VOLLEY_DIRECT_BOOTARGS);
+    // Set boot args based on mode - this is the key cmdline for Linux init
+    ErrorPrint(L"Volley: BuildVolleyBootConfigForMode: mode=%d\r\n", Mode);
+    switch (Mode) {
+        case VOLLEY_MODE_INSTALL:
+            ErrorPrint(L"Volley: Setting boot args for INSTALL mode\r\n");
+            Status = AllocateBootOptionString(&Option->BootArgs,
+                L"root=PARTUUID=" VOLLEY_EMMC_APP_PARTUUID L" volley.mode=install");
+            break;
+        case VOLLEY_MODE_SLOT_A:
+            ErrorPrint(L"Volley: Setting boot args for SLOT_A mode\r\n");
+            Status = AllocateBootOptionString(&Option->BootArgs,
+                L"root=PARTUUID=" VOLLEY_NVME_SLOT_A_PARTUUID);
+            break;
+        case VOLLEY_MODE_SLOT_B:
+            ErrorPrint(L"Volley: Setting boot args for SLOT_B mode\r\n");
+            Status = AllocateBootOptionString(&Option->BootArgs,
+                L"root=PARTUUID=" VOLLEY_NVME_SLOT_B_PARTUUID);
+            break;
+        default:
+            ErrorPrint(L"Volley: Unknown mode %d, defaulting to INSTALL\r\n", Mode);
+            Status = AllocateBootOptionString(&Option->BootArgs,
+                L"root=PARTUUID=" VOLLEY_EMMC_APP_PARTUUID L" volley.mode=install");
+            break;
+    }
     if (EFI_ERROR(Status))
     {
         goto Error;
     }
+
+    ErrorPrint(L"Volley: Boot config built:\r\n");
+    ErrorPrint(L"  Kernel: %s\r\n", Option->LinuxPath);
+    ErrorPrint(L"  DTB:    %s\r\n", Option->DtbPath);
+    ErrorPrint(L"  Args:   %s\r\n", Option->BootArgs);
 
     return EFI_SUCCESS;
 
@@ -1225,6 +2084,8 @@ ProcessExtLinuxConfig(IN EFI_HANDLE DeviceHandle, IN UINT32 BootChain,
 {
     EFI_STATUS Status;
     UINTN Index;
+    VOLLEY_BOOT_MODE BootMode;
+    EFI_HANDLE EmmcAppHandle = NULL;
 
     ZeroMem(BootConfig, sizeof(EXTLINUX_BOOT_CONFIG));
 
@@ -1233,14 +2094,41 @@ ProcessExtLinuxConfig(IN EFI_HANDLE DeviceHandle, IN UINT32 BootChain,
         return EFI_INVALID_PARAMETER;
     }
 
-    Status = FindPartitionInfo(DeviceHandle, ROOTFS_BASE_NAME, BootChain, NULL, RootFsHandle);
-    if (EFI_ERROR(Status))
-    {
-        ErrorPrint(L"%a: Unable to find partition info\r\n", __FUNCTION__);
-        return Status;
+    // DeviceHandle is the eMMC ESP partition (where L4TLauncher.efi lives)
+    ErrorPrint(L"Volley: ProcessExtLinuxConfig starting\r\n");
+    ErrorPrint(L"Volley: ESP device handle: 0x%p\r\n", DeviceHandle);
+    PrintPartitionUuid(DeviceHandle);
+
+    // Find eMMC APP partition - kernel is at /boot/Image on this partition for install mode
+    ErrorPrint(L"Volley: Searching for eMMC APP partition...\r\n");
+    Status = FindPartitionInfo(DeviceHandle, L"APP", 0, NULL, &EmmcAppHandle);
+    if (EFI_ERROR(Status) || EmmcAppHandle == NULL) {
+        ErrorPrint(L"Volley: FAILED to find eMMC APP partition: %r\r\n", Status);
+        ErrorPrint(L"Volley: Kernel cannot be loaded without APP partition\r\n");
+        return EFI_NOT_FOUND;
+    }
+    ErrorPrint(L"Volley: Found eMMC APP partition: 0x%p\r\n", EmmcAppHandle);
+    PrintPartitionUuid(EmmcAppHandle);
+
+    // VolleyDetermineBootMode will:
+    //   - Read boot_config.txt from EspHandle (1st arg)
+    //   - Fall back to EmmcAppHandle (2nd arg) if install mode
+    //   - Set RootFsHandle to NVMe slot if normal boot
+    ErrorPrint(L"Volley: Calling VolleyDetermineBootMode...\r\n");
+    Status = VolleyDetermineBootMode(DeviceHandle, EmmcAppHandle, &BootMode, RootFsHandle);
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: Boot mode detection failed: %r\r\n", Status);
+        ErrorPrint(L"Volley: Falling back to install mode\r\n");
+        BootMode = VOLLEY_MODE_INSTALL;
+        *RootFsHandle = EmmcAppHandle;
     }
 
-    Status = BuildVolleyDirectBootConfig(BootConfig);
+    ErrorPrint(L"Volley: Boot mode = %d (0=INSTALL, 1=SLOT_A, 2=SLOT_B)\r\n", BootMode);
+    ErrorPrint(L"Volley: RootFsHandle = 0x%p\r\n", *RootFsHandle);
+    PrintPartitionUuid(*RootFsHandle);
+
+    // Build boot configuration based on determined mode
+    Status = BuildVolleyBootConfigForMode(BootMode, BootConfig);
     if (EFI_ERROR(Status))
     {
         return Status;
@@ -1434,8 +2322,13 @@ ExtLinuxBoot(IN EFI_HANDLE ImageHandle, IN EFI_HANDLE DeviceHandle,
     // Load and start the kernel
     if (BootOption->LinuxPath != NULL)
     {
+        ErrorPrint(L"%a: Loading kernel from path: %s\r\n", __FUNCTION__, BootOption->LinuxPath);
+        ErrorPrint(L"%a: Device handle for kernel: 0x%p\r\n", __FUNCTION__, DeviceHandle);
+        PrintPartitionUuid(DeviceHandle);
+
         if (EncryptionInfo.ImageEncrypted)
         {
+            ErrorPrint(L"%a: Kernel is encrypted, decrypting...\r\n", __FUNCTION__);
             Status = OpenAndDecryptFileToBuffer(DeviceHandle, BootOption->LinuxPath, &KernelBase,
                                                 &KernelSize);
             if (EFI_ERROR(Status))
@@ -1445,32 +2338,40 @@ ExtLinuxBoot(IN EFI_HANDLE ImageHandle, IN EFI_HANDLE DeviceHandle,
                 goto Exit;
             }
 
+            ErrorPrint(L"%a: Decrypted kernel, size=%u, loading image...\r\n", __FUNCTION__, KernelSize);
             Status = gBS->LoadImage(TRUE, ImageHandle, NULL, KernelBase, KernelSize, &KernelHandle);
             if (EFI_ERROR(Status))
             {
                 ErrorPrint(L"%a: Unable to load image: %s %r\r\n", __FUNCTION__,
                            BootOption->LinuxPath, Status);
+                PrintPartitionUuid(DeviceHandle);
                 goto Exit;
             }
         }
         else
         {
+            ErrorPrint(L"%a: Kernel is not encrypted, loading directly...\r\n", __FUNCTION__);
             KernelDevicePath = FileDevicePath(DeviceHandle, BootOption->LinuxPath);
             if (KernelDevicePath == NULL)
             {
-                ErrorPrint(L"%a: Failed to create device path\r\n", __FUNCTION__);
+                ErrorPrint(L"%a: Failed to create device path for kernel\r\n", __FUNCTION__);
                 Status = EFI_OUT_OF_RESOURCES;
                 goto Exit;
             }
 
+            ErrorPrint(L"%a: Calling LoadImage for kernel...\r\n", __FUNCTION__);
             Status = gBS->LoadImage(FALSE, ImageHandle, KernelDevicePath, NULL, 0, &KernelHandle);
             if (EFI_ERROR(Status))
             {
-                ErrorPrint(L"%a: Unable to load image: %s %r\r\n", __FUNCTION__,
+                ErrorPrint(L"%a: FAILED to load kernel: %s %r\r\n", __FUNCTION__,
                            BootOption->LinuxPath, Status);
+                ErrorPrint(L"%a: Searched on partition:\r\n", __FUNCTION__);
+                PrintPartitionUuid(DeviceHandle);
                 goto Exit;
             }
         }
+
+        ErrorPrint(L"%a: Kernel loaded successfully!\r\n", __FUNCTION__);
 
         if (NewArgs != NULL)
         {
@@ -1479,19 +2380,19 @@ ExtLinuxBoot(IN EFI_HANDLE ImageHandle, IN EFI_HANDLE DeviceHandle,
                 gBS->HandleProtocol(KernelHandle, &gEfiLoadedImageProtocolGuid, (VOID**)&ImageInfo);
             if (EFI_ERROR(Status))
             {
+                ErrorPrint(L"%a: Failed to get loaded image protocol: %r\r\n", __FUNCTION__, Status);
                 goto Exit;
             }
 
             ImageInfo->LoadOptions = NewArgs;
             ImageInfo->LoadOptionsSize = StrLen(NewArgs) * sizeof(CHAR16);
-            DEBUG((DEBUG_ERROR, "%s", ImageInfo->LoadOptions));
+            ErrorPrint(L"%a: Kernel cmdline: %s\r\n", __FUNCTION__, NewArgs);
         }
 
         // Before calling the image, enable the Watchdog Timer for  the 5 Minute period
         gBS->SetWatchdogTimer(5 * 60, 0x10000, 0, NULL);
 
-        DEBUG((DEBUG_ERROR, "%a: Cmdline: \n", __FUNCTION__));
-
+        ErrorPrint(L"%a: Starting kernel image...\r\n", __FUNCTION__);
         Status = gBS->StartImage(KernelHandle, NULL, NULL);
 
         // Clear the Watchdog Timer if the image returns
@@ -1704,6 +2605,9 @@ ProcessBootParams(IN EFI_LOADED_IMAGE_PROTOCOL* LoadedImage, OUT L4T_BOOT_PARAMS
     return EFI_SUCCESS;
 }
 
+// DISABLED: Android boot path removed for deterministic boot
+// These functions are unused when Android boot fallback is disabled
+#if 0
 /**
   Reads an android style kernel partition located with Partition base
   name and bootchain.
@@ -2160,6 +3064,7 @@ Exit:
 
     return Status;
 }
+#endif  // Android boot-from-partition path disabled
 
 /**
   Boots an android style image already loaded in memory
@@ -2360,26 +3265,34 @@ L4TLauncher(IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE* SystemTable)
         if (BootParams.BootMode == NVIDIA_L4T_BOOTMODE_DIRECT)
         {
             ErrorPrint(L"%a: Attempting Direct Boot\r\n", __FUNCTION__);
+            ErrorPrint(L"%a: LoadedImage->DeviceHandle = 0x%p\r\n", __FUNCTION__, LoadedImage->DeviceHandle);
             do
             {
+                ErrorPrint(L"%a: Calling ProcessExtLinuxConfig...\r\n", __FUNCTION__);
                 Status = ProcessExtLinuxConfig(LoadedImage->DeviceHandle, BootParams.BootChain,
                                                &ExtLinuxConfig, &RootFsDeviceHandle);
                 if (EFI_ERROR(Status))
                 {
-                    ErrorPrint(L"%a: Unable to process extlinux config: %r\r\n", __FUNCTION__,
-                               Status);
-                    BootParams.BootMode = NVIDIA_L4T_BOOTMODE_BOOTIMG;
+                    ErrorPrint(L"%a: ProcessExtLinuxConfig FAILED: %r\r\n", __FUNCTION__, Status);
+                    ErrorPrint(L"%a: FATAL: No fallback boot path available\r\n", __FUNCTION__);
+                    // Do NOT fall back to Android boot - it loads unwanted initrd
                     break;
                 }
 
+                ErrorPrint(L"%a: ProcessExtLinuxConfig succeeded\r\n", __FUNCTION__);
+                ErrorPrint(L"%a: RootFsDeviceHandle = 0x%p\r\n", __FUNCTION__, RootFsDeviceHandle);
+                PrintPartitionUuid(RootFsDeviceHandle);
+
                 ExtLinuxBootOption = ExtLinuxBootMenu(&ExtLinuxConfig);
 
+                ErrorPrint(L"%a: Calling ExtLinuxBoot with boot option %u...\r\n", __FUNCTION__, ExtLinuxBootOption);
                 Status = ExtLinuxBoot(ImageHandle, RootFsDeviceHandle,
                                       &ExtLinuxConfig.BootOptions[ExtLinuxBootOption]);
                 if (EFI_ERROR(Status))
                 {
-                    ErrorPrint(L"%a: Unable to boot via extlinux: %r\r\n", __FUNCTION__, Status);
-                    BootParams.BootMode = NVIDIA_L4T_BOOTMODE_BOOTIMG;
+                    ErrorPrint(L"%a: ExtLinuxBoot FAILED: %r\r\n", __FUNCTION__, Status);
+                    ErrorPrint(L"%a: FATAL: No fallback boot path available\r\n", __FUNCTION__);
+                    // Do NOT fall back to Android boot - it loads unwanted initrd
                     break;
                 }
             } while (FALSE);
@@ -2430,22 +3343,14 @@ L4TLauncher(IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE* SystemTable)
             }
         }
 
-        // Not in else to allow fallback
+        // DISABLED: Android boot path removed for deterministic boot
+        // Kernel must be at /boot/Image on the selected device (eMMC or NVMe slot)
+        // The kernel has embedded initramfs - no external ramdisk needed
         if (BootParams.BootMode == NVIDIA_L4T_BOOTMODE_BOOTIMG)
         {
-            ErrorPrint(L"%a: Attempting Kernel Boot\r\n", __FUNCTION__);
-            Status = BootAndroidStylePartition(LoadedImage->DeviceHandle, BOOTIMG_BASE_NAME,
-                                               BOOTIMG_DTB_BASE_NAME, &BootParams);
-            if (EFI_ERROR(Status))
-            {
-                ErrorPrint(L"Failed to boot %s:%d partition\r\n", BOOTIMG_BASE_NAME,
-                           BootParams.BootChain);
-                // Warm reset if there is valid rootfs
-                if (IsValidRootfs())
-                {
-                    ResetCold();
-                }
-            }
+            ErrorPrint(L"%a: Android boot path disabled for deterministic boot\r\n", __FUNCTION__);
+            ErrorPrint(L"%a: Kernel must be at /boot/Image on selected device\r\n", __FUNCTION__);
+            Status = EFI_UNSUPPORTED;
         }
         else if (BootParams.BootMode == NVIDIA_L4T_BOOTMODE_RECOVERY)
         {

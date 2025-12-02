@@ -70,6 +70,7 @@
   gEfiDiskIoProtocolGuid
   gEfiLoadFile2ProtocolGuid
   gEfiPkcs7VerifyProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid
 
 [UserExtensions.TianoCore."ExtraFiles"]
   L4TLauncherExtra.uni

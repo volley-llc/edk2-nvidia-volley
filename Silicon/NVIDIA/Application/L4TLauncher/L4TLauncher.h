@@ -51,6 +51,42 @@
 
 #define MAX_EXTLINUX_OPTIONS  10
 
+//
+// Volley Boot Mode - determines which device/slot to boot from
+//
+typedef enum {
+    VOLLEY_MODE_INSTALL,    // Boot from eMMC for installation (UUID mismatch or no NVMe)
+    VOLLEY_MODE_SLOT_A,     // Boot from NVMe slot A (p1)
+    VOLLEY_MODE_SLOT_B,     // Boot from NVMe slot B (p2)
+} VOLLEY_BOOT_MODE;
+
+//
+// Parsed boot_config.txt from eMMC ESP
+//
+typedef struct {
+    BOOLEAN     Valid;              // TRUE if config was successfully parsed
+    EFI_GUID    ExpectedNvmeUuid;   // expected_nvme_uuid value (GPT DiskGUID)
+} VOLLEY_BOOT_CONFIG;
+
+//
+// Parsed slot_meta.txt from NVMe partition
+//
+typedef struct {
+    BOOLEAN     Valid;          // TRUE if valid=1 in file
+    UINT32      UpdateCounter;  // update_counter value for slot selection
+} VOLLEY_SLOT_META;
+
+//
+// Volley boot configuration file paths and partition UUIDs
+//
+#define VOLLEY_BOOT_CONFIG_PATH     L"boot_config.txt"
+#define VOLLEY_SLOT_META_PATH       L"slot_meta.txt"
+
+// Fixed PARTUUIDs for boot cmdline
+#define VOLLEY_EMMC_APP_PARTUUID    L"840a8a6a-e0c7-4d16-9007-fea99d2c4bc9"
+#define VOLLEY_NVME_SLOT_A_PARTUUID L"e1fce829-2b17-4b1c-b635-1093618dd0f4"
+#define VOLLEY_NVME_SLOT_B_PARTUUID L"b77bb181-a13f-4dca-ae3c-38c564326356"
+
 typedef struct {
   CHAR16    *Label;
   CHAR16    *MenuLabel;
