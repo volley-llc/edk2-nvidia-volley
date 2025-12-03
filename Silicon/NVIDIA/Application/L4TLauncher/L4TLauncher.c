@@ -1986,27 +1986,28 @@ BuildVolleyBootConfigForMode(
     }
 
     // Set boot args based on mode - this is the key cmdline for Linux init
+    // VOLLEY_BASE_CMDLINE provides earlycon/console/noinitrd (Jetson 5.10 has no CMDLINE_EXTEND)
     ErrorPrint(L"Volley: BuildVolleyBootConfigForMode: mode=%d\r\n", Mode);
     switch (Mode) {
         case VOLLEY_MODE_INSTALL:
             ErrorPrint(L"Volley: Setting boot args for INSTALL mode\r\n");
             Status = AllocateBootOptionString(&Option->BootArgs,
-                L"root=PARTUUID=" VOLLEY_EMMC_APP_PARTUUID L" volley.mode=install");
+                VOLLEY_BASE_CMDLINE L"root=PARTUUID=" VOLLEY_EMMC_APP_PARTUUID L" volley.mode=install");
             break;
         case VOLLEY_MODE_SLOT_A:
             ErrorPrint(L"Volley: Setting boot args for SLOT_A mode\r\n");
             Status = AllocateBootOptionString(&Option->BootArgs,
-                L"root=PARTUUID=" VOLLEY_NVME_SLOT_A_PARTUUID);
+                VOLLEY_BASE_CMDLINE L"root=PARTUUID=" VOLLEY_NVME_SLOT_A_PARTUUID);
             break;
         case VOLLEY_MODE_SLOT_B:
             ErrorPrint(L"Volley: Setting boot args for SLOT_B mode\r\n");
             Status = AllocateBootOptionString(&Option->BootArgs,
-                L"root=PARTUUID=" VOLLEY_NVME_SLOT_B_PARTUUID);
+                VOLLEY_BASE_CMDLINE L"root=PARTUUID=" VOLLEY_NVME_SLOT_B_PARTUUID);
             break;
         default:
             ErrorPrint(L"Volley: Unknown mode %d, defaulting to INSTALL\r\n", Mode);
             Status = AllocateBootOptionString(&Option->BootArgs,
-                L"root=PARTUUID=" VOLLEY_EMMC_APP_PARTUUID L" volley.mode=install");
+                VOLLEY_BASE_CMDLINE L"root=PARTUUID=" VOLLEY_EMMC_APP_PARTUUID L" volley.mode=install");
             break;
     }
     if (EFI_ERROR(Status))

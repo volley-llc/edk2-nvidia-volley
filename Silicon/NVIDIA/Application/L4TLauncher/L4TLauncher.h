@@ -87,6 +87,9 @@ typedef struct {
 #define VOLLEY_NVME_SLOT_A_PARTUUID L"e1fce829-2b17-4b1c-b635-1093618dd0f4"
 #define VOLLEY_NVME_SLOT_B_PARTUUID L"b77bb181-a13f-4dca-ae3c-38c564326356"
 
+// Base kernel command line (Jetson 5.10 kernel has no CMDLINE_EXTEND)
+#define VOLLEY_BASE_CMDLINE         L"earlycon=tegra_comb_uart,mmio32,0x0c168000 console=ttyTCU0,115200n8 noinitrd "
+
 typedef struct {
   CHAR16    *Label;
   CHAR16    *MenuLabel;
