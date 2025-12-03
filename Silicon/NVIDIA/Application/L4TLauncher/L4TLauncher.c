@@ -33,6 +33,7 @@ reserved.
 #include <Protocol/DiskIo.h>
 #include <Protocol/LoadFile2.h>
 #include <Protocol/SimpleFileSystem.h>
+#include <Protocol/PciRootBridgeIo.h>
 
 #include <Guid/LinuxEfiInitrdMedia.h>
 #include <Protocol/Pkcs7Verify.h>
@@ -1344,6 +1345,56 @@ ReadVolleyBootConfig(
 }
 
 /**
+  Connect all PCI root bridges to enumerate PCI devices including NVMe.
+
+  This is necessary before attempting to find NVMe devices, as they may
+  not be visible until the PCI bus driver connects the root bridges.
+**/
+STATIC
+VOID
+ConnectPciRootBridges(
+    VOID
+)
+{
+    EFI_STATUS  Status;
+    EFI_HANDLE  *Handles = NULL;
+    UINTN       NumHandles;
+    UINTN       Index;
+
+    // Locate all PCI root bridge handles
+    Status = gBS->LocateHandleBuffer(
+        ByProtocol,
+        &gEfiPciRootBridgeIoProtocolGuid,
+        NULL,
+        &NumHandles,
+        &Handles
+    );
+
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: No PCI root bridges found: %r\r\n", Status);
+        return;
+    }
+
+    ErrorPrint(L"Volley: Connecting %u PCI root bridge(s)...\r\n", NumHandles);
+
+    // Connect each root bridge to enumerate PCI devices
+    for (Index = 0; Index < NumHandles; Index++) {
+        Status = gBS->ConnectController(
+            Handles[Index],
+            NULL,   // DriverImageHandle - use all available drivers
+            NULL,   // RemainingDevicePath - produce all children
+            TRUE    // Recursive - connect all child controllers
+        );
+        if (EFI_ERROR(Status)) {
+            DEBUG((DEBUG_WARN, "Volley: Failed to connect PCI root bridge %u: %r\n", Index, Status));
+        }
+    }
+
+    FreePool(Handles);
+    ErrorPrint(L"Volley: PCI enumeration complete\r\n");
+}
+
+/**
   Find NVMe disk device by enumerating Block I/O protocol handles.
 
   @param[out] BlockIo       Block I/O protocol for NVMe disk
@@ -1755,11 +1806,12 @@ SelectBestSlot(
 
   Algorithm:
   1. Read boot_config.txt from eMMC APP partition
-  2. Find NVMe device
-  3. Read NVMe GPT DiskGUID
-  4. Compare UUIDs - if mismatch, install mode
-  5. If match, read slot metadata and select best slot
-  6. Verify selected slot's partition GUID matches expected PARTUUID
+  2. Connect PCI root bridges to enumerate NVMe devices
+  3. Find NVMe device
+  4. Read NVMe GPT DiskGUID
+  5. Compare UUIDs - if mismatch, install mode
+  6. If match, read slot metadata and select best slot
+  7. Verify selected slot's partition GUID matches expected PARTUUID
 
   @param[in]  EspHandle     Handle to eMMC ESP partition (where L4TLauncher lives)
   @param[in]  EmmcAppHandle Handle to eMMC APP partition (for install mode kernel)
@@ -1807,7 +1859,10 @@ VolleyDetermineBootMode(
         return EFI_SUCCESS;
     }
 
-    // Step 2: Find NVMe device
+    // Step 2: Connect PCI root bridges to enumerate NVMe devices
+    ConnectPciRootBridges();
+
+    // Step 3: Find NVMe device
     Status = FindNvmeDevice(&NvmeBlockIo, &NvmeDeviceHandle);
     if (EFI_ERROR(Status)) {
         ErrorPrint(L"Volley: No NVMe device found\r\n");
@@ -1817,7 +1872,7 @@ VolleyDetermineBootMode(
         return EFI_SUCCESS;
     }
 
-    // Step 3: Read NVMe GPT DiskGUID
+    // Step 4: Read NVMe GPT DiskGUID
     Status = ReadNvmeDiskGuid(NvmeBlockIo, &NvmeDiskGuid);
     if (EFI_ERROR(Status)) {
         ErrorPrint(L"Volley: Failed to read NVMe GPT header\r\n");
@@ -1827,7 +1882,7 @@ VolleyDetermineBootMode(
         return EFI_SUCCESS;
     }
 
-    // Step 4: Compare UUIDs
+    // Step 5: Compare UUIDs
     if (!CompareGuid(&NvmeDiskGuid, &BootConfig.ExpectedNvmeUuid)) {
         ErrorPrint(L"Volley: NVMe UUID mismatch\r\n");
         ErrorPrint(L"  Expected: %g\r\n", &BootConfig.ExpectedNvmeUuid);
@@ -1840,7 +1895,7 @@ VolleyDetermineBootMode(
 
     ErrorPrint(L"Volley: NVMe UUID matches (%g)\r\n", &NvmeDiskGuid);
 
-    // Step 5: Find partition handles for slots A and B
+    // Step 6: Find partition handles for slots A and B
     // Check for mountable filesystem (FAT) before reading slot_meta.txt
     Status = FindNvmePartitionByNumber(NvmeDeviceHandle, 1, &SlotAHandle);
     if (EFI_ERROR(Status)) {
@@ -1876,7 +1931,7 @@ VolleyDetermineBootMode(
         }
     }
 
-    // Step 6: Select best slot
+    // Step 7: Select best slot
     Status = SelectBestSlot(&SlotAMeta, &SlotBMeta, BootMode);
     if (EFI_ERROR(Status)) {
         ErrorPrint(L"Volley: Both slots invalid\r\n");
@@ -1886,7 +1941,7 @@ VolleyDetermineBootMode(
         return EFI_SUCCESS;
     }
 
-    // Step 7: Verify partition GUID matches expected PARTUUID
+    // Step 8: Verify partition GUID matches expected PARTUUID
     if (*BootMode == VOLLEY_MODE_SLOT_A) {
         SelectedHandle = SlotAHandle;
         StrToGuid(VOLLEY_NVME_SLOT_A_PARTUUID, &ExpectedGuid);

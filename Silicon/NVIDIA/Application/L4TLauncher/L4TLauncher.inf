@@ -71,6 +71,7 @@
   gEfiLoadFile2ProtocolGuid
   gEfiPkcs7VerifyProtocolGuid
   gEfiSimpleFileSystemProtocolGuid
+  gEfiPciRootBridgeIoProtocolGuid
 
 [UserExtensions.TianoCore."ExtraFiles"]
   L4TLauncherExtra.uni
