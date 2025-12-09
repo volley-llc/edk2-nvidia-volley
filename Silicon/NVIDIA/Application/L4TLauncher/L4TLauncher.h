@@ -88,7 +88,8 @@ typedef struct {
 #define VOLLEY_NVME_SLOT_B_PARTUUID L"b77bb181-a13f-4dca-ae3c-38c564326356"
 
 // Base kernel command line (Jetson 5.10 kernel has no CMDLINE_EXTEND)
-#define VOLLEY_BASE_CMDLINE         L"earlycon=tegra_comb_uart,mmio32,0x0c168000 console=ttyTCU0,115200n8 noinitrd "
+// usbcore.autosuspend=-1 disables USB autosuspend to prevent ZED camera disconnects
+#define VOLLEY_BASE_CMDLINE         L"earlycon=tegra_comb_uart,mmio32,0x0c168000 console=ttyTCU0,115200n8 noinitrd usbcore.autosuspend=-1 "
 
 typedef struct {
   CHAR16    *Label;

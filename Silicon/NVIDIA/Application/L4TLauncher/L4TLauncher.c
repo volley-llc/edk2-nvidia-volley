@@ -66,7 +66,7 @@ reserved.
 #endif
 
 #ifndef VOLLEY_DIRECT_BOOTARGS
-#define VOLLEY_DIRECT_BOOTARGS L""
+#define VOLLEY_DIRECT_BOOTARGS L"usbcore.autosuspend=-1"
 #endif
 
 /**
@@ -2043,6 +2043,7 @@ BuildVolleyBootConfigForMode(
     // Set boot args based on mode - this is the key cmdline for Linux init
     // VOLLEY_BASE_CMDLINE provides earlycon/console/noinitrd (Jetson 5.10 has no CMDLINE_EXTEND)
     ErrorPrint(L"Volley: BuildVolleyBootConfigForMode: mode=%d\r\n", Mode);
+    ErrorPrint(L"Volley: USB autosuspend disabled (usbcore.autosuspend=-1)\r\n");
     switch (Mode) {
         case VOLLEY_MODE_INSTALL:
             ErrorPrint(L"Volley: Setting boot args for INSTALL mode\r\n");
