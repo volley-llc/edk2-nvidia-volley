@@ -10,6 +10,7 @@ reserved.
 
 #include <PiPei.h>
 
+#include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/UefiLib.h>
 #include <Library/HobLib.h>
@@ -1157,6 +1158,337 @@ AllocateBootOptionString(CHAR16** Target, CONST CHAR16* Source)
 // ============================================================================
 //
 
+#define VOLLEY_HASH_READ_CHUNK_SIZE (1024 * 1024)
+#define VOLLEY_SHA256_DIGEST_SIZE   32
+#define VOLLEY_SHA256_HEX_LEN       64
+
+typedef struct {
+    UINT8  Data[64];
+    UINT32 State[8];
+    UINT64 BitLen;
+    UINTN  DataLen;
+} VOLLEY_SHA256_CTX;
+
+STATIC CONST UINT32 mSha256K[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+};
+
+#define ROTR32(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+#define CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
+#define MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
+#define EP0(x) (ROTR32((x), 2) ^ ROTR32((x), 13) ^ ROTR32((x), 22))
+#define EP1(x) (ROTR32((x), 6) ^ ROTR32((x), 11) ^ ROTR32((x), 25))
+#define SIG0(x) (ROTR32((x), 7) ^ ROTR32((x), 18) ^ ((x) >> 3))
+#define SIG1(x) (ROTR32((x), 17) ^ ROTR32((x), 19) ^ ((x) >> 10))
+
+STATIC
+VOID
+VolleySha256Transform(
+    IN OUT VOLLEY_SHA256_CTX *Ctx,
+    IN CONST UINT8           Data[64]
+)
+{
+    UINT32 A;
+    UINT32 B;
+    UINT32 C;
+    UINT32 D;
+    UINT32 E;
+    UINT32 F;
+    UINT32 G;
+    UINT32 H;
+    UINT32 T1;
+    UINT32 T2;
+    UINT32 W[64];
+    UINTN  I;
+
+    for (I = 0; I < 16; I++) {
+        W[I] = ((UINT32)Data[I * 4] << 24) |
+               ((UINT32)Data[I * 4 + 1] << 16) |
+               ((UINT32)Data[I * 4 + 2] << 8) |
+               ((UINT32)Data[I * 4 + 3]);
+    }
+
+    for (I = 16; I < 64; I++) {
+        W[I] = SIG1(W[I - 2]) + W[I - 7] + SIG0(W[I - 15]) + W[I - 16];
+    }
+
+    A = Ctx->State[0];
+    B = Ctx->State[1];
+    C = Ctx->State[2];
+    D = Ctx->State[3];
+    E = Ctx->State[4];
+    F = Ctx->State[5];
+    G = Ctx->State[6];
+    H = Ctx->State[7];
+
+    for (I = 0; I < 64; I++) {
+        T1 = H + EP1(E) + CH(E, F, G) + mSha256K[I] + W[I];
+        T2 = EP0(A) + MAJ(A, B, C);
+        H = G;
+        G = F;
+        F = E;
+        E = D + T1;
+        D = C;
+        C = B;
+        B = A;
+        A = T1 + T2;
+    }
+
+    Ctx->State[0] += A;
+    Ctx->State[1] += B;
+    Ctx->State[2] += C;
+    Ctx->State[3] += D;
+    Ctx->State[4] += E;
+    Ctx->State[5] += F;
+    Ctx->State[6] += G;
+    Ctx->State[7] += H;
+}
+
+STATIC
+VOID
+VolleySha256Init(
+    IN OUT VOLLEY_SHA256_CTX *Ctx
+)
+{
+    Ctx->DataLen = 0;
+    Ctx->BitLen = 0;
+    Ctx->State[0] = 0x6a09e667;
+    Ctx->State[1] = 0xbb67ae85;
+    Ctx->State[2] = 0x3c6ef372;
+    Ctx->State[3] = 0xa54ff53a;
+    Ctx->State[4] = 0x510e527f;
+    Ctx->State[5] = 0x9b05688c;
+    Ctx->State[6] = 0x1f83d9ab;
+    Ctx->State[7] = 0x5be0cd19;
+}
+
+STATIC
+VOID
+VolleySha256Update(
+    IN OUT VOLLEY_SHA256_CTX *Ctx,
+    IN CONST UINT8           *Data,
+    IN UINTN                 Len
+)
+{
+    UINTN I;
+
+    for (I = 0; I < Len; I++) {
+        Ctx->Data[Ctx->DataLen++] = Data[I];
+        if (Ctx->DataLen == sizeof(Ctx->Data)) {
+            VolleySha256Transform(Ctx, Ctx->Data);
+            Ctx->BitLen += 512;
+            Ctx->DataLen = 0;
+        }
+    }
+}
+
+STATIC
+VOID
+VolleySha256Final(
+    IN OUT VOLLEY_SHA256_CTX *Ctx,
+    OUT UINT8                *Digest
+)
+{
+    UINTN I;
+    UINT64 BitLen;
+
+    BitLen = Ctx->BitLen + ((UINT64)Ctx->DataLen * 8);
+
+    Ctx->Data[Ctx->DataLen++] = 0x80;
+    if (Ctx->DataLen > 56) {
+        SetMem(Ctx->Data + Ctx->DataLen, 64 - Ctx->DataLen, 0);
+        VolleySha256Transform(Ctx, Ctx->Data);
+        Ctx->DataLen = 0;
+    }
+
+    SetMem(Ctx->Data + Ctx->DataLen, 56 - Ctx->DataLen, 0);
+    Ctx->Data[56] = (UINT8)(BitLen >> 56);
+    Ctx->Data[57] = (UINT8)(BitLen >> 48);
+    Ctx->Data[58] = (UINT8)(BitLen >> 40);
+    Ctx->Data[59] = (UINT8)(BitLen >> 32);
+    Ctx->Data[60] = (UINT8)(BitLen >> 24);
+    Ctx->Data[61] = (UINT8)(BitLen >> 16);
+    Ctx->Data[62] = (UINT8)(BitLen >> 8);
+    Ctx->Data[63] = (UINT8)(BitLen);
+    VolleySha256Transform(Ctx, Ctx->Data);
+
+    for (I = 0; I < 8; I++) {
+        Digest[I * 4] = (UINT8)(Ctx->State[I] >> 24);
+        Digest[I * 4 + 1] = (UINT8)(Ctx->State[I] >> 16);
+        Digest[I * 4 + 2] = (UINT8)(Ctx->State[I] >> 8);
+        Digest[I * 4 + 3] = (UINT8)(Ctx->State[I]);
+    }
+}
+
+STATIC
+INTN
+HexCharToNibble(
+    IN CHAR8 C
+)
+{
+    if (C >= '0' && C <= '9') {
+        return C - '0';
+    }
+    if (C >= 'a' && C <= 'f') {
+        return 10 + (C - 'a');
+    }
+    if (C >= 'A' && C <= 'F') {
+        return 10 + (C - 'A');
+    }
+    return -1;
+}
+
+STATIC
+EFI_STATUS
+ParseSha256DigestSpan(
+    IN  CONST CHAR8 *Start,
+    IN  CONST CHAR8 *End,
+    OUT UINT8       *Digest
+)
+{
+    UINTN Index;
+    INTN  Hi;
+    INTN  Lo;
+
+    if (Start == NULL || End == NULL || Digest == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    if ((End <= Start) || ((End - Start) != VOLLEY_SHA256_HEX_LEN)) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    for (Index = 0; Index < VOLLEY_SHA256_DIGEST_SIZE; Index++) {
+        Hi = HexCharToNibble(Start[Index * 2]);
+        Lo = HexCharToNibble(Start[Index * 2 + 1]);
+        if (Hi < 0 || Lo < 0) {
+            return EFI_INVALID_PARAMETER;
+        }
+        Digest[Index] = (UINT8)((Hi << 4) | Lo);
+    }
+
+    return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+ParseSlotCheckEntry(
+    IN  CONST CHAR8         *Value,
+    IN  VOLLEY_SLOT_META    *SlotMeta
+)
+{
+    CONST CHAR8 *ValueStart;
+    CONST CHAR8 *ValueEnd;
+    CONST CHAR8 *AlgStart;
+    CONST CHAR8 *AlgEnd;
+    CONST CHAR8 *DigestStart;
+    CONST CHAR8 *DigestEnd;
+    CONST CHAR8 *PathStart;
+    CONST CHAR8 *PathEnd;
+    CONST CHAR8 *Comma;
+    CONST CHAR8 *Comma2;
+    CHAR8        Alg[16];
+    CHAR8        PathAscii[VOLLEY_MAX_CHECK_PATH_CHARS];
+    UINTN        AlgLen;
+    UINTN        PathLen;
+    EFI_STATUS   Status;
+    RETURN_STATUS StrStatus;
+    VOLLEY_SLOT_META *Meta;
+    UINT8        Digest[VOLLEY_SHA256_DIGEST_SIZE];
+
+    if (Value == NULL || SlotMeta == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    Meta = SlotMeta;
+    if (Meta->CheckCount >= VOLLEY_MAX_CHECKS) {
+        return EFI_BUFFER_TOO_SMALL;
+    }
+
+    ValueStart = Value;
+    ValueEnd = Value + AsciiStrLen(Value);
+    TrimAsciiSpan(&ValueStart, &ValueEnd);
+    if (ValueEnd <= ValueStart) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    AlgStart = ValueStart;
+    Comma = AlgStart;
+    while (Comma < ValueEnd && *Comma != ',') {
+        Comma++;
+    }
+    if (Comma >= ValueEnd) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    AlgEnd = Comma;
+    TrimAsciiSpan(&AlgStart, &AlgEnd);
+    AlgLen = (UINTN)(AlgEnd - AlgStart);
+    if (AlgLen == 0 || AlgLen >= sizeof(Alg)) {
+        return EFI_INVALID_PARAMETER;
+    }
+    CopyMem(Alg, AlgStart, AlgLen);
+    Alg[AlgLen] = '\0';
+
+    if (AsciiStriCmp(Alg, "sha256") != 0) {
+        return EFI_UNSUPPORTED;
+    }
+
+    DigestStart = Comma + 1;
+    Comma2 = DigestStart;
+    while (Comma2 < ValueEnd && *Comma2 != ',') {
+        Comma2++;
+    }
+    if (Comma2 >= ValueEnd) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    DigestEnd = Comma2;
+    TrimAsciiSpan(&DigestStart, &DigestEnd);
+    Status = ParseSha256DigestSpan(DigestStart, DigestEnd, Digest);
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
+
+    PathStart = Comma2 + 1;
+    PathEnd = ValueEnd;
+    TrimAsciiSpan(&PathStart, &PathEnd);
+    PathLen = (UINTN)(PathEnd - PathStart);
+    if (PathLen == 0 || PathLen >= sizeof(PathAscii)) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    CopyMem(PathAscii, PathStart, PathLen);
+    PathAscii[PathLen] = '\0';
+
+    Meta->Checks[Meta->CheckCount].Valid = TRUE;
+    CopyMem(Meta->Checks[Meta->CheckCount].Sha256, Digest, sizeof(Digest));
+    StrStatus = AsciiStrToUnicodeStrS(PathAscii, Meta->Checks[Meta->CheckCount].Path,
+                                      VOLLEY_MAX_CHECK_PATH_CHARS);
+    if (RETURN_ERROR(StrStatus)) {
+        Meta->Checks[Meta->CheckCount].Valid = FALSE;
+        return EFI_INVALID_PARAMETER;
+    }
+
+    Meta->CheckCount++;
+    return EFI_SUCCESS;
+}
+
 /**
   Parse a key=value configuration file and invoke callback for each pair.
 
@@ -1732,6 +2064,7 @@ SlotMetaCallback(
 )
 {
     VOLLEY_SLOT_META *SlotMeta = (VOLLEY_SLOT_META *)Context;
+    EFI_STATUS        Status;
 
     if (AsciiStrCmp(Key, "update_counter") == 0) {
         SlotMeta->UpdateCounter = (UINT32)AsciiStrDecimalToUintn(Value);
@@ -1740,6 +2073,12 @@ SlotMetaCallback(
         if (AsciiStrCmp(Value, "1") == 0) {
             SlotMeta->Valid = TRUE;
             DEBUG((DEBUG_INFO, "Volley: Slot is valid\n"));
+        }
+    } else if (AsciiStrCmp(Key, "check") == 0) {
+        Status = ParseSlotCheckEntry(Value, SlotMeta);
+        if (EFI_ERROR(Status)) {
+            SlotMeta->ParseError = TRUE;
+            ErrorPrint(L"Volley: Invalid check entry in slot_meta.txt\r\n");
         }
     }
 
@@ -1771,8 +2110,10 @@ ReadSlotMetadata(
     }
 
     ZeroMem(SlotMeta, sizeof(VOLLEY_SLOT_META));
+    SlotMeta->ParseError = FALSE;
     SlotMeta->Valid = FALSE;
     SlotMeta->UpdateCounter = 0;
+    SlotMeta->CheckCount = 0;
 
     // Read slot_meta.txt from partition
     Status = OpenAndReadUntrustedFileToBuffer(
@@ -1798,8 +2139,127 @@ ReadSlotMetadata(
 
     FreePool(FileData);
 
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
+
+    if (SlotMeta->ParseError) {
+        SlotMeta->Valid = FALSE;
+    }
+
     if (!SlotMeta->Valid) {
         DEBUG((DEBUG_INFO, "Volley: Slot marked as invalid (valid != 1)\n"));
+    }
+
+    return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+HashFileSha256(
+    IN  EFI_HANDLE      PartitionHandle,
+    IN  CONST CHAR16    *FileName,
+    OUT UINT8           *Digest
+)
+{
+    EFI_STATUS      Status = EFI_SUCCESS;
+    EFI_DEVICE_PATH *DevicePath = NULL;
+    EFI_DEVICE_PATH *NextDevicePath;
+    EFI_FILE_HANDLE Handle = NULL;
+    VOLLEY_SHA256_CTX Ctx;
+    UINT8            *Buffer = NULL;
+    UINTN            ReadSize;
+
+    if (FileName == NULL || Digest == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    DevicePath = FileDevicePath(PartitionHandle, FileName);
+    if (DevicePath == NULL) {
+        Status = EFI_OUT_OF_RESOURCES;
+        goto Exit;
+    }
+
+    NextDevicePath = DevicePath;
+    Status = EfiOpenFileByDevicePath(&NextDevicePath, &Handle, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(Status)) {
+        goto Exit;
+    }
+
+    VolleySha256Init(&Ctx);
+
+    Buffer = AllocatePool(VOLLEY_HASH_READ_CHUNK_SIZE);
+    if (Buffer == NULL) {
+        Status = EFI_OUT_OF_RESOURCES;
+        goto Exit;
+    }
+
+    do {
+        ReadSize = VOLLEY_HASH_READ_CHUNK_SIZE;
+        Status = FileHandleRead(Handle, &ReadSize, Buffer);
+        if (EFI_ERROR(Status)) {
+            goto Exit;
+        }
+        if (ReadSize == 0) {
+            break;
+        }
+        VolleySha256Update(&Ctx, Buffer, ReadSize);
+    } while (ReadSize > 0);
+
+    VolleySha256Final(&Ctx, Digest);
+
+Exit:
+    if (Buffer != NULL) {
+        FreePool(Buffer);
+    }
+    if (Handle != NULL) {
+        FileHandleClose(Handle);
+    }
+    if (DevicePath != NULL) {
+        FreePool(DevicePath);
+    }
+
+    return Status;
+}
+
+STATIC
+EFI_STATUS
+ValidateSlotChecks(
+    IN  EFI_HANDLE          PartitionHandle,
+    IN  VOLLEY_SLOT_META    *SlotMeta
+)
+{
+    EFI_STATUS  Status;
+    UINTN       Index;
+    UINT8       Digest[VOLLEY_SHA256_DIGEST_SIZE];
+
+    if (SlotMeta == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    if (!SlotMeta->Valid || SlotMeta->CheckCount == 0) {
+        return EFI_SUCCESS;
+    }
+
+    for (Index = 0; Index < SlotMeta->CheckCount; Index++) {
+        if (!SlotMeta->Checks[Index].Valid) {
+            SlotMeta->Valid = FALSE;
+            return EFI_INVALID_PARAMETER;
+        }
+
+        Status = HashFileSha256(PartitionHandle, SlotMeta->Checks[Index].Path, Digest);
+        if (EFI_ERROR(Status)) {
+            ErrorPrint(L"Volley: Hash read failed for %s: %r\r\n",
+                       SlotMeta->Checks[Index].Path, Status);
+            SlotMeta->Valid = FALSE;
+            return Status;
+        }
+
+        if (CompareMem(Digest, SlotMeta->Checks[Index].Sha256, sizeof(Digest)) != 0) {
+            ErrorPrint(L"Volley: Hash mismatch for %s\r\n", SlotMeta->Checks[Index].Path);
+            SlotMeta->Valid = FALSE;
+            return EFI_COMPROMISED_DATA;
+        }
     }
 
     return EFI_SUCCESS;
@@ -2001,6 +2461,7 @@ VolleyDetermineBootMode(
             ZeroMem(&SlotAMeta, sizeof(SlotAMeta));
         } else {
             ReadSlotMetadata(SlotAHandle, &SlotAMeta);
+            ValidateSlotChecks(SlotAHandle, &SlotAMeta);
             ErrorPrint(L"Volley: Slot A: valid=%d update_counter=%u\r\n",
                        SlotAMeta.Valid, SlotAMeta.UpdateCounter);
         }
@@ -2017,6 +2478,7 @@ VolleyDetermineBootMode(
             ZeroMem(&SlotBMeta, sizeof(SlotBMeta));
         } else {
             ReadSlotMetadata(SlotBHandle, &SlotBMeta);
+            ValidateSlotChecks(SlotBHandle, &SlotBMeta);
             ErrorPrint(L"Volley: Slot B: valid=%d update_counter=%u\r\n",
                        SlotBMeta.Valid, SlotBMeta.UpdateCounter);
         }

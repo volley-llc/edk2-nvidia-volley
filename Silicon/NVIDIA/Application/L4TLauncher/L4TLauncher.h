@@ -68,12 +68,23 @@ typedef struct {
     EFI_GUID    ExpectedNvmeUuid;   // expected_nvme_uuid value (GPT DiskGUID)
 } VOLLEY_BOOT_CONFIG;
 
+// Slot verification limits
+#define VOLLEY_MAX_CHECKS           16
+#define VOLLEY_MAX_CHECK_PATH_CHARS 256
+
 //
 // Parsed slot_meta.txt from NVMe partition
 //
 typedef struct {
+    BOOLEAN     ParseError;     // TRUE if slot metadata parsing failed
     BOOLEAN     Valid;          // TRUE if valid=1 in file
     UINT32      UpdateCounter;  // update_counter value for slot selection
+    UINTN       CheckCount;     // number of hash checks
+    struct {
+        BOOLEAN Valid;
+        UINT8   Sha256[32];
+        CHAR16  Path[VOLLEY_MAX_CHECK_PATH_CHARS];
+    } Checks[VOLLEY_MAX_CHECKS];
 } VOLLEY_SLOT_META;
 
 //
