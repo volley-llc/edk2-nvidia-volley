@@ -3776,7 +3776,7 @@ L4TLauncher(IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE* SystemTable)
     TEGRA_PLATFORM_RESOURCE_INFO* PlatformResourceInfo;
 
     Print(L"VOLLEY modified L4TLauncher ${VOLLEY_BUILD_INFO}\r\n");
-    Print(L"VOLLEY features: KeyboardIgnored;DirectBootFixedDTB;DtbAutoSelect;eMMCPrimary\r\n");
+    Print(L"VOLLEY features: KeyboardIgnored;DirectBootFixedDTB;DtbAutoSelect;eMMCPrimary;SHA256Checks\r\n");
     Print(L"VOLLEY target: %s (%s)\r\n", VOLLEY_SYSTEM_NAME,
           VolleyIsIndustrial() ? L"industrial" : L"non-industrial");
     Status = gBS->HandleProtocol(ImageHandle, &gEfiLoadedImageProtocolGuid, (VOID**)&LoadedImage);
