@@ -1162,6 +1162,13 @@ AllocateBootOptionString(CHAR16** Target, CONST CHAR16* Source)
 #define VOLLEY_SHA256_DIGEST_SIZE   32
 #define VOLLEY_SHA256_HEX_LEN       64
 
+STATIC
+EFI_STATUS
+TrimAsciiSpan(
+    IN OUT CONST CHAR8 **Start,
+    IN OUT CONST CHAR8 **End
+);
+
 typedef struct {
     UINT8  Data[64];
     UINT32 State[8];
