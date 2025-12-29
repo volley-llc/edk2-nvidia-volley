@@ -1806,6 +1806,45 @@ ReadSlotMetadata(
 }
 
 /**
+  Validate that a partition is bootable for Volley.
+
+  Requires a mountable filesystem and the kernel image present.
+
+  @param[in]  PartitionHandle  Handle to the partition
+  @param[in]  KernelPath       Path to kernel image (device-relative)
+
+  @retval EFI_SUCCESS          Bootable
+  @retval Others               Not bootable
+**/
+STATIC
+EFI_STATUS
+ValidateVolleyBootPartition(
+    IN  EFI_HANDLE      PartitionHandle,
+    IN  CONST CHAR16    *KernelPath
+)
+{
+    EFI_STATUS       Status;
+    EFI_FILE_HANDLE  KernelHandle = NULL;
+    VOID             *Fs = NULL;
+
+    if (KernelPath == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    Status = gBS->HandleProtocol(PartitionHandle, &gEfiSimpleFileSystemProtocolGuid, &Fs);
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
+
+    Status = OpenAndReadUntrustedFileToBuffer(PartitionHandle, KernelPath, &KernelHandle, NULL, NULL);
+    if (!EFI_ERROR(Status) && KernelHandle != NULL) {
+        FileHandleClose(KernelHandle);
+    }
+
+    return Status;
+}
+
+/**
   Select the best boot slot based on metadata.
 
   @param[in]  SlotA         Metadata for slot A
@@ -1893,7 +1932,6 @@ VolleyDetermineBootMode(
     EFI_HANDLE                  SlotBHandle = NULL;
     VOLLEY_SLOT_META            SlotAMeta;
     VOLLEY_SLOT_META            SlotBMeta;
-    VOID                        *Fs = NULL;
     EFI_PARTITION_INFO_PROTOCOL *PartInfo = NULL;
     EFI_GUID                    ExpectedGuid;
     EFI_HANDLE                  SelectedHandle = NULL;
@@ -1951,16 +1989,15 @@ VolleyDetermineBootMode(
     ErrorPrint(L"Volley: NVMe UUID matches (%g)\r\n", &NvmeDiskGuid);
 
     // Step 6: Find partition handles for slots A and B
-    // Check for mountable filesystem (FAT) before reading slot_meta.txt
+    // Require a mountable filesystem and kernel image before reading slot_meta.txt
     Status = FindNvmePartitionByNumber(NvmeDeviceHandle, 1, &SlotAHandle);
     if (EFI_ERROR(Status)) {
         ErrorPrint(L"Volley: Slot A (p1) partition not found\r\n");
         ZeroMem(&SlotAMeta, sizeof(SlotAMeta));
     } else {
-        // Check for mountable filesystem before attempting to read
-        Status = gBS->HandleProtocol(SlotAHandle, &gEfiSimpleFileSystemProtocolGuid, &Fs);
+        Status = ValidateVolleyBootPartition(SlotAHandle, VOLLEY_DIRECT_KERNEL_PATH);
         if (EFI_ERROR(Status)) {
-            ErrorPrint(L"Volley: Slot A has no mountable filesystem (ext4?)\r\n");
+            ErrorPrint(L"Volley: Slot A not bootable (missing filesystem or kernel)\r\n");
             ZeroMem(&SlotAMeta, sizeof(SlotAMeta));
         } else {
             ReadSlotMetadata(SlotAHandle, &SlotAMeta);
@@ -1974,10 +2011,9 @@ VolleyDetermineBootMode(
         ErrorPrint(L"Volley: Slot B (p2) partition not found\r\n");
         ZeroMem(&SlotBMeta, sizeof(SlotBMeta));
     } else {
-        // Check for mountable filesystem before attempting to read
-        Status = gBS->HandleProtocol(SlotBHandle, &gEfiSimpleFileSystemProtocolGuid, &Fs);
+        Status = ValidateVolleyBootPartition(SlotBHandle, VOLLEY_DIRECT_KERNEL_PATH);
         if (EFI_ERROR(Status)) {
-            ErrorPrint(L"Volley: Slot B has no mountable filesystem (ext4?)\r\n");
+            ErrorPrint(L"Volley: Slot B not bootable (missing filesystem or kernel)\r\n");
             ZeroMem(&SlotBMeta, sizeof(SlotBMeta));
         } else {
             ReadSlotMetadata(SlotBHandle, &SlotBMeta);
