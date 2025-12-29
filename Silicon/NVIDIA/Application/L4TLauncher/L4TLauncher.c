@@ -1175,6 +1175,36 @@ AllocateBootOptionString(CHAR16** Target, CONST CHAR16* Source)
 **/
 STATIC
 EFI_STATUS
+TrimAsciiSpan(
+    IN OUT CONST CHAR8 **Start,
+    IN OUT CONST CHAR8 **End
+)
+{
+    const CHAR8 *S;
+    const CHAR8 *E;
+
+    if (Start == NULL || End == NULL || *Start == NULL || *End == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    S = *Start;
+    E = *End;
+
+    while (S < E && (*S == ' ' || *S == '\t')) {
+        S++;
+    }
+
+    while (E > S && (E[-1] == ' ' || E[-1] == '\t')) {
+        E--;
+    }
+
+    *Start = S;
+    *End = E;
+    return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
 ParseKeyValueFile(
     IN  CONST CHAR8     *Buffer,
     IN  UINTN           BufferSize,
@@ -1186,6 +1216,11 @@ ParseKeyValueFile(
     CONST CHAR8 *LineEnd;
     CONST CHAR8 *BufferEnd;
     CONST CHAR8 *Equals;
+    CONST CHAR8 *KeyStart;
+    CONST CHAR8 *KeyEnd;
+    CONST CHAR8 *ValueStart;
+    CONST CHAR8 *ValueEnd;
+    CONST CHAR8 *Comment;
     CHAR8       Key[64];
     CHAR8       Value[256];
     UINTN       KeyLen;
@@ -1207,28 +1242,48 @@ ParseKeyValueFile(
         }
 
         // Skip empty lines and comments
-        if (LineEnd > LineStart && *LineStart != '#') {
+        KeyStart = LineStart;
+        KeyEnd = LineEnd;
+        TrimAsciiSpan(&KeyStart, &KeyEnd);
+        if (KeyEnd > KeyStart && *KeyStart != '#') {
             // Find '=' separator
-            Equals = LineStart;
-            while (Equals < LineEnd && *Equals != '=') {
+            Equals = KeyStart;
+            while (Equals < KeyEnd && *Equals != '=') {
                 Equals++;
             }
 
-            if (Equals < LineEnd && Equals > LineStart) {
+            if (Equals < KeyEnd && Equals > KeyStart) {
                 // Extract key
-                KeyLen = Equals - LineStart;
+                KeyStart = KeyStart;
+                KeyEnd = Equals;
+                TrimAsciiSpan(&KeyStart, &KeyEnd);
+                KeyLen = (UINTN)(KeyEnd - KeyStart);
                 if (KeyLen >= sizeof(Key)) {
                     KeyLen = sizeof(Key) - 1;
                 }
-                CopyMem(Key, LineStart, KeyLen);
+                CopyMem(Key, KeyStart, KeyLen);
                 Key[KeyLen] = '\0';
 
                 // Extract value
-                ValueLen = LineEnd - (Equals + 1);
+                ValueStart = Equals + 1;
+                ValueEnd = LineEnd;
+                TrimAsciiSpan(&ValueStart, &ValueEnd);
+
+                // Strip inline comments in value
+                Comment = ValueStart;
+                while (Comment < ValueEnd && *Comment != '#') {
+                    Comment++;
+                }
+                if (Comment < ValueEnd) {
+                    ValueEnd = Comment;
+                    TrimAsciiSpan(&ValueStart, &ValueEnd);
+                }
+
+                ValueLen = (UINTN)(ValueEnd - ValueStart);
                 if (ValueLen >= sizeof(Value)) {
                     ValueLen = sizeof(Value) - 1;
                 }
-                CopyMem(Value, Equals + 1, ValueLen);
+                CopyMem(Value, ValueStart, ValueLen);
                 Value[ValueLen] = '\0';
 
                 // Call callback
