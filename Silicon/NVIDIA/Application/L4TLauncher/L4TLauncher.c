@@ -2267,6 +2267,8 @@ ValidateSlotChecks(
             SlotMeta->Valid = FALSE;
             return EFI_COMPROMISED_DATA;
         }
+
+        ErrorPrint(L"Volley: Hash OK for %s\r\n", SlotMeta->Checks[Index].Path);
     }
 
     return EFI_SUCCESS;
