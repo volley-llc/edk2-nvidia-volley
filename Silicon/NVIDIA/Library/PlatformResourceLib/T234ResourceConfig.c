@@ -493,15 +493,9 @@ T234GetActiveBootChain (
   OUT UINT32  *BootChain
   )
 {
-  *BootChain = MmioBitFieldRead32 (
-                 FixedPcdGet64 (PcdBootChainRegisterBaseAddressT234),
-                 BOOT_CHAIN_BIT_FIELD_LO,
-                 BOOT_CHAIN_BIT_FIELD_HI
-                 );
+  (VOID)CpuBootloaderAddress;
 
-  if (*BootChain >= BOOT_CHAIN_MAX) {
-    return EFI_UNSUPPORTED;
-  }
+  *BootChain = BOOT_CHAIN_A;
 
   return EFI_SUCCESS;
 }
@@ -719,6 +713,33 @@ T234SetNextBootChain (
   return EFI_SUCCESS;
 }
 
+/**
+  Force the next boot chain to A and clear chain failure status.
+
+**/
+EFI_STATUS
+EFIAPI
+T234ForceNextBootChainA (
+  VOID
+  )
+{
+  MmioBitFieldWrite32 (
+    FixedPcdGet64 (PcdBootChainRegisterBaseAddressT234),
+    BOOT_CHAIN_BIT_FIELD_LO,
+    BOOT_CHAIN_BIT_FIELD_HI,
+    BOOT_CHAIN_A
+    );
+
+  MmioBitFieldWrite32 (
+    FixedPcdGet64 (PcdBootChainRegisterBaseAddressT234),
+    BOOT_CHAIN_STATUS_LO,
+    BOOT_CHAIN_STATUS_HI,
+    BOOT_CHAIN_GOOD
+    );
+
+  return EFI_SUCCESS;
+}
+
 EFI_STATUS
 EFIAPI
 T234GetActiveBootChainStMm (
@@ -726,17 +747,9 @@ T234GetActiveBootChainStMm (
   OUT UINT32  *BootChain
   )
 {
-  *BootChain = MmioBitFieldRead32 (
-                 ScratchBase + BOOT_CHAIN_SCRATCH_OFFSET,
-                 BOOT_CHAIN_BIT_FIELD_LO,
-                 BOOT_CHAIN_BIT_FIELD_HI
-                 );
+  (VOID)ScratchBase;
 
-  DEBUG ((DEBUG_INFO, "%a: addr=0x%llx bootchain=%u\n", __FUNCTION__, ScratchBase, *BootChain));
-
-  if (*BootChain >= BOOT_CHAIN_MAX) {
-    return EFI_UNSUPPORTED;
-  }
+  *BootChain = BOOT_CHAIN_A;
 
   return EFI_SUCCESS;
 }

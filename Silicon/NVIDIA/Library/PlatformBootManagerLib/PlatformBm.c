@@ -13,7 +13,6 @@
 
 #include <IndustryStandard/Pci22.h>
 #include <Library/BootLogoLib.h>
-#include <Library/CapsuleLib.h>
 #include <Library/BaseLib.h>
 #include <Library/DevicePathLib.h>
 #include <Library/DxeServicesLib.h>
@@ -26,13 +25,10 @@
 #include <Library/BaseCryptLib.h>
 #include <Library/PlatformResourceLib.h>
 #include <Library/PrintLib.h>
-#include <Library/DxeCapsuleLibFmp/CapsuleOnDisk.h>
 #include <Library/DtPlatformDtbLoaderLib.h>
 #include <Library/NVIDIADebugLib.h>
 #include <Library/TimerLib.h>
-#include <Protocol/BootChainProtocol.h>
 #include <Protocol/DevicePath.h>
-#include <Protocol/EsrtManagement.h>
 #include <Protocol/GenericMemoryTest.h>
 #include <Protocol/GraphicsOutput.h>
 #include <Protocol/LoadedImage.h>
@@ -42,6 +38,7 @@
 #include <Protocol/PciRootBridgeIo.h>
 #include <Protocol/PlatformBootManager.h>
 #include <Guid/EventGroup.h>
+#include <Guid/GlobalVariable.h>
 #include <Guid/RtPropertiesTable.h>
 #include <Guid/TtyTerm.h>
 #include <Guid/SerialPortLibVendor.h>
@@ -1102,6 +1099,30 @@ PlatformConfigured (
   }
 }
 
+STATIC
+VOID
+DeleteBootNextVariable (
+  VOID
+  )
+{
+  EFI_STATUS  Status;
+
+  Status = gRT->SetVariable (
+                  L"BootNext",
+                  &gEfiGlobalVariableGuid,
+                  EFI_VARIABLE_NON_VOLATILE |
+                  EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                  EFI_VARIABLE_RUNTIME_ACCESS,
+                  0,
+                  NULL
+                  );
+  if (!EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_INFO, "%a: deleted stale BootNext override\n", __FUNCTION__));
+  } else if (Status != EFI_NOT_FOUND) {
+    DEBUG ((DEBUG_WARN, "%a: failed to delete BootNext override: %r\n", __FUNCTION__, Status));
+  }
+}
+
 /**
   Update ConOut, ErrOut, ConIn variables to contain all available devices.
   For initial boot, all consoles are registered. Afterwards, only GOP consoles
@@ -1216,6 +1237,12 @@ PlatformBootManagerBeforeConsole (
 
   // Headless: skip connecting display devices and GOP output.
 
+  //
+  // Keep eMMC/L4T priority deterministic. SetBootOrder only rewrites BootOrder
+  // when the stored order is wrong, so this has no steady-state variable churn.
+  //
+  SetBootOrder ();
+
   if (!IsSingleBootNeeded ()) {
     if (IsPlatformConfigurationNeeded ()) {
       // Headless: skip connecting all devices (avoid USB/display).
@@ -1270,34 +1297,6 @@ PlatformBootManagerBeforeConsole (
   }
 }
 
-STATIC
-VOID
-EFIAPI
-HandleBootChainUpdate (
-  VOID
-  )
-{
-  NVIDIA_BOOT_CHAIN_PROTOCOL  *BootChainProtocol;
-  EFI_STATUS                  Status;
-
-  Status = gBS->LocateProtocol (
-                  &gNVIDIABootChainProtocolGuid,
-                  NULL,
-                  (VOID **)&BootChainProtocol
-                  );
-  if (EFI_ERROR (Status)) {
-    DEBUG ((
-      DEBUG_ERROR,
-      "Boot Chain Protocol Guid=%g not found: %r\n",
-      &gNVIDIABootChainProtocolGuid,
-      Status
-      ));
-    return;
-  }
-
-  BootChainProtocol->ExecuteUpdate (BootChainProtocol);
-}
-
 /**
   Do the platform specific action after the console is ready.
   Volley: Skip splash, diagnostics, and capsule processing for fast boot.
@@ -1308,8 +1307,8 @@ PlatformBootManagerAfterConsole (
   VOID
   )
 {
-  // Volley: headless/fast path; skip splash, memory tests, IPMI prints, and capsules.
-  HandleBootChainUpdate ();
+  // Volley: headless/fast path; skip splash, memory tests, IPMI prints,
+  // capsules, and boot-chain updates.
 }
 
 
@@ -1353,6 +1352,7 @@ PlatformBootManagerBdsEntry (
   VOID
   )
 {
+  DeleteBootNextVariable ();
   return;
 }
 
@@ -1365,6 +1365,11 @@ PlatformBootManagerPriorityBoot (
   UINT16  **BootNext
   )
 {
+  if (BootNext != NULL) {
+    *BootNext = NULL;
+  }
+
+  DeleteBootNextVariable ();
   return;
 }
 

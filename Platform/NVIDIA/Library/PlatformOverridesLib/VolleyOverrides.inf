@@ -42,5 +42,10 @@
   gEfiSimpleTextInputExProtocolGuid
   gNVIDIACvmEepromProtocolGuid
 
+[Guids]
+  gEfiGlobalVariableGuid
+  gNVIDIAPublicVariableGuid
+  gNVIDIATokenSpaceGuid
+
 [Depex]
   TRUE

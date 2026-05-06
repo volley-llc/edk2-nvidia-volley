@@ -339,16 +339,9 @@ T194GetActiveBootChain (
   OUT UINT32  *BootChain
   )
 {
-  if (T194BootChainIsValid (CpuBootloaderAddress) != TRUE) {
-    // No valid slot number is found in scratch register. Return default slot
-    *BootChain = BOOT_CHAIN_A;
-  } else {
-    *BootChain = MmioBitFieldRead32 (
-                   FixedPcdGet64 (PcdBootLoaderRegisterBaseAddressT194),
-                   BL_CURRENT_BOOT_CHAIN_BIT_FIELD_LO,
-                   BL_CURRENT_BOOT_CHAIN_BIT_FIELD_HI
-                   );
-  }
+  (VOID)CpuBootloaderAddress;
+
+  *BootChain = BOOT_CHAIN_A;
 
   return EFI_SUCCESS;
 }
@@ -562,6 +555,40 @@ T194SetNextBootChain (
       BOOT_CHAIN_GOOD
       );
   }
+
+  return EFI_SUCCESS;
+}
+
+/**
+  Force the next boot chain to A and clear chain failure status.
+
+**/
+EFI_STATUS
+EFIAPI
+T194ForceNextBootChainA (
+  VOID
+  )
+{
+  MmioBitFieldWrite32 (
+    FixedPcdGet64 (PcdBootROMRegisterBaseAddressT194),
+    BR_CURRENT_BOOT_CHAIN_BIT_FIELD,
+    BR_CURRENT_BOOT_CHAIN_BIT_FIELD,
+    BOOT_CHAIN_A
+    );
+
+  MmioBitFieldWrite32 (
+    FixedPcdGet64 (PcdBootLoaderRegisterBaseAddressT194),
+    BL_BOOT_CHAIN_STATUS_A_BIT_FIELD,
+    BL_BOOT_CHAIN_STATUS_A_BIT_FIELD,
+    BOOT_CHAIN_GOOD
+    );
+
+  MmioBitFieldWrite32 (
+    FixedPcdGet64 (PcdBootLoaderRegisterBaseAddressT194),
+    BL_BOOT_CHAIN_STATUS_B_BIT_FIELD,
+    BL_BOOT_CHAIN_STATUS_B_BIT_FIELD,
+    BOOT_CHAIN_GOOD
+    );
 
   return EFI_SUCCESS;
 }

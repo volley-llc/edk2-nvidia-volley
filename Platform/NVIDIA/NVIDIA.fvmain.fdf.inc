@@ -20,8 +20,6 @@
   INF ArmPkg/Drivers/CpuDxe/CpuDxe.inf
   INF MdeModulePkg/Core/RuntimeDxe/RuntimeDxe.inf
   INF MdeModulePkg/Universal/SecurityStubDxe/SecurityStubDxe.inf
-  INF MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
-  INF MdeModulePkg/Application/CapsuleApp/CapsuleApp.inf
   INF MdeModulePkg/Universal/MonotonicCounterRuntimeDxe/MonotonicCounterRuntimeDxe.inf
   INF MdeModulePkg/Universal/ResetSystemRuntimeDxe/ResetSystemRuntimeDxe.inf
   INF EmbeddedPkg/RealTimeClockRuntimeDxe/RealTimeClockRuntimeDxe.inf
@@ -31,16 +29,6 @@
   INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableSmmRuntimeDxe.inf
   INF MdeModulePkg/Universal/TimestampDxe/TimestampDxe.inf
   INF MdeModulePkg/Universal/StatusCodeHandler/RuntimeDxe/StatusCodeHandlerRuntimeDxe.inf
-
-  #
-  # Esrt - EFI System Resource Table
-  #
-  INF MdeModulePkg/Universal/EsrtFmpDxe/EsrtFmpDxe.inf
-
-  #
-  # Fmp
-  #
-  INF FILE_GUID = $(SYSTEM_FMP_ESRT_GUID) FmpDevicePkg/FmpDxe/FmpDxe.inf
 
   #
   # Device discovery protocol
@@ -271,11 +259,6 @@
 
 
   #
-  # Capsule Update Policy Protocol
-  #
-  INF Silicon/NVIDIA/Drivers/CapsuleUpdatePolicyDxe/CapsuleUpdatePolicyDxe.inf
-
-  #
   # Tegra EEPROM Support
   #
   INF Silicon/NVIDIA/Drivers/EepromDxe/Eeprom.inf
@@ -290,10 +273,6 @@
   #
   INF Silicon/NVIDIA/Drivers/TegraPinControlDxe/TegraPinControlDxe.inf
 
-  #
-  # Boot Chain Protocol
-  #
-  INF Silicon/NVIDIA/Drivers/BootChainDxe/BootChainDxe.inf
   #
   # Ipmi Blob Transfer support
   #

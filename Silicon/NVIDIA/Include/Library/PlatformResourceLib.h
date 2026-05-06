@@ -222,6 +222,19 @@ SetNextBootChain (
   );
 
 /**
+  Force the next boot chain to A and clear firmware chain failure status.
+
+  @retval EFI_SUCCESS           Operation successful
+  @retval others                Error occurred
+
+**/
+EFI_STATUS
+EFIAPI
+ForceNextBootChainA (
+  VOID
+  );
+
+/**
   Get Platform Resource Information
   Does not update the CPU info structures.
 

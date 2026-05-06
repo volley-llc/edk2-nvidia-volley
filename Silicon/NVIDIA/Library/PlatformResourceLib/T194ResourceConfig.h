@@ -95,6 +95,16 @@ T194SetNextBootChain (
   );
 
 /**
+  Force the next boot chain to A and clear chain failure status.
+
+**/
+EFI_STATUS
+EFIAPI
+T194ForceNextBootChainA (
+  VOID
+  );
+
+/**
   Fills in the EnabledCoresBitMap
 
 **/

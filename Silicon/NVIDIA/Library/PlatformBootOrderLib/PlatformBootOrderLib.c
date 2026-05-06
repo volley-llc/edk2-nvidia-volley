@@ -169,10 +169,8 @@ SetBootOrder (
                         &VariableSize,
                         (VOID *)&VariableData
                         );
-  if (!EFI_ERROR (Status) && (VariableSize == sizeof (BOOLEAN))) {
-    if (VariableData == TRUE) {
-      return;
-    }
+  if (!EFI_ERROR (Status) && (VariableSize == sizeof (BOOLEAN)) && (VariableData == TRUE)) {
+    DEBUG ((DEBUG_VERBOSE, "%a: PlatformBootOrderSet is true; rechecking order anyway\r\n", __FUNCTION__));
   }
 
   Priority = 0;
@@ -257,14 +255,16 @@ SetBootOrder (
     }
   }
 
-  VariableData = TRUE;
-  gRT->SetVariable (
-         L"PlatformBootOrderSet",
-         &gNVIDIATokenSpaceGuid,
-         EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_NON_VOLATILE,
-         sizeof (BOOLEAN),
-         &VariableData
-         );
+  if (VariableData != TRUE) {
+    VariableData = TRUE;
+    gRT->SetVariable (
+           L"PlatformBootOrderSet",
+           &gNVIDIATokenSpaceGuid,
+           EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_NON_VOLATILE,
+           sizeof (BOOLEAN),
+           &VariableData
+           );
+  }
 
   return;
 }

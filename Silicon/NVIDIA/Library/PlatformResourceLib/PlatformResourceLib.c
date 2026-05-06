@@ -378,6 +378,33 @@ SetNextBootChain (
 }
 
 /**
+  Force the next boot chain to A and clear chain failure status.
+
+**/
+EFI_STATUS
+EFIAPI
+ForceNextBootChainA (
+  VOID
+  )
+{
+  UINTN  ChipID;
+
+  ChipID = TegraGetChipID ();
+
+  switch (ChipID) {
+    case T234_CHIP_ID:
+      return T234ForceNextBootChainA ();
+      break;
+    case T194_CHIP_ID:
+      return T194ForceNextBootChainA ();
+      break;
+    default:
+      return EFI_UNSUPPORTED;
+      break;
+  }
+}
+
+/**
   Get Max Core info from DTB
 
 */

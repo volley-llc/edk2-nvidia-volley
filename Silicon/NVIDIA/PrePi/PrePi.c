@@ -415,6 +415,10 @@ CEntryPoint (
   InitialMemory[1].Attributes   = (ARM_MEMORY_REGION_ATTRIBUTES)0;
   InitMmu (InitialMemory);
   MapCorePlatformMemory ();
+  Status = ForceNextBootChainA ();
+  if (EFI_ERROR (Status)) {
+    DEBUG ((EFI_D_ERROR, "Failed to force next boot chain A: %r\n", Status));
+  }
 
   SerialPortIdentify (&Mapping);
   while (Mapping->Compatibility != NULL) {

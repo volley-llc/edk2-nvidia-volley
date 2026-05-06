@@ -102,6 +102,16 @@ T234SetNextBootChain (
   );
 
 /**
+  Force the next boot chain to A and clear chain failure status.
+
+**/
+EFI_STATUS
+EFIAPI
+T234ForceNextBootChainA (
+  VOID
+  );
+
+/**
   Fills in the EnabledCoresBitMap
 
 **/

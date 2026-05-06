@@ -708,7 +708,6 @@ CONFIG_MEMORY_TEST=n
      <LibraryClasses>
        NULL|SecurityPkg/Library/DxeImageVerificationLib/DxeImageVerificationLib.inf
   }
-  MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
   MdeModulePkg/Universal/MonotonicCounterRuntimeDxe/MonotonicCounterRuntimeDxe.inf
   MdeModulePkg/Universal/ResetSystemRuntimeDxe/ResetSystemRuntimeDxe.inf
   EmbeddedPkg/RealTimeClockRuntimeDxe/RealTimeClockRuntimeDxe.inf
@@ -921,27 +920,6 @@ CONFIG_MEMORY_TEST=n
   SecurityPkg/EnrollFromDefaultKeysApp/EnrollFromDefaultKeysApp.inf
 
   #
-  # Capsule Application
-  #
-  MdeModulePkg/Application/CapsuleApp/CapsuleApp.inf
-
-  #
-  # Esrt - EFI System Resource Table
-  #
-  MdeModulePkg/Universal/EsrtFmpDxe/EsrtFmpDxe.inf
-
-  #
-  # Fmp
-  #
-  FmpDevicePkg/FmpDxe/FmpDxe.inf {
-    <Defines>
-      #
-      # FILE_GUID is used as ESRT GUID
-      #
-      FILE_GUID = $(SYSTEM_FMP_ESRT_GUID)
-  }
-
-  #
   # Dynamic Table Factory Dxe
   #
   DynamicTablesPkg/Drivers/DynamicTableFactoryDxe/DynamicTableFactoryDxe.inf {
@@ -1004,11 +982,6 @@ CONFIG_MEMORY_TEST=n
 
 
   #
-  # Capsule Update Policy Protocol
-  #
-  Silicon/NVIDIA/Drivers/CapsuleUpdatePolicyDxe/CapsuleUpdatePolicyDxe.inf
-
-  #
   # Tegra EEPROM Support
   #
   Silicon/NVIDIA/Drivers/EepromDxe/Eeprom.inf
@@ -1022,11 +995,6 @@ CONFIG_MEMORY_TEST=n
   # Tegra Pin Control support
   #
   Silicon/NVIDIA/Drivers/TegraPinControlDxe/TegraPinControlDxe.inf
-
-  #
-  # Boot Chain Protocol
-  #
-  Silicon/NVIDIA/Drivers/BootChainDxe/BootChainDxe.inf
 
   #
   # Ipmi Blob Transfer support

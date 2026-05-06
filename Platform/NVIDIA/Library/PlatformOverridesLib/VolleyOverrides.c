@@ -22,6 +22,9 @@ STATIC
 VOID SetVolleyDtbPath(VOID);
 
 STATIC
+VOID DeleteVolleyBootChainVariables(VOID);
+
+STATIC
 VOID
 EFIAPI
 OnCvmEepromAvailable(IN EFI_EVENT Event, IN VOID *Context);
@@ -41,6 +44,8 @@ VolleyOverridesEntry(IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE* SystemTable
   } else {
     DEBUG((DEBUG_INFO, "%a: Keyboard input disabled\n", __FUNCTION__));
   }
+
+  DeleteVolleyBootChainVariables();
 
   SetVolleyDtbPath();
 
@@ -68,6 +73,38 @@ VolleyOverridesEntry(IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE* SystemTable
 #define VOLLEY_DTB_PREFIX        L"EFI\\volley\\dtb\\"
 #define VOLLEY_DTB_AGX           L"tegra194-p2888-0001-p2822-0000.dtb"
 #define VOLLEY_DTB_AGX_INDUSTRIAL L"tegra194-p2888-0008-p2822-0000.dtb"
+
+STATIC
+VOID DeleteVolleyVariable(IN CONST CHAR16 *Name, IN EFI_GUID *Guid, IN UINT32 Attributes)
+{
+  EFI_STATUS Status;
+
+  Status = gRT->SetVariable(Name, Guid, Attributes, 0, NULL);
+  if (!EFI_ERROR(Status)) {
+    DEBUG((DEBUG_INFO, "%a: Deleted %s\n", __FUNCTION__, Name));
+  } else if (Status != EFI_NOT_FOUND) {
+    DEBUG((DEBUG_WARN, "%a: Failed to delete %s: %r\n", __FUNCTION__, Name, Status));
+  }
+}
+
+STATIC
+VOID DeleteVolleyBootChainVariables(VOID)
+{
+  DeleteVolleyVariable(L"BootChainFwCurrent", &gNVIDIAPublicVariableGuid,
+                       EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS);
+  DeleteVolleyVariable(L"BootChainFwNext", &gNVIDIAPublicVariableGuid,
+                       EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS |
+                       EFI_VARIABLE_NON_VOLATILE);
+  DeleteVolleyVariable(L"BootChainFwStatus", &gNVIDIAPublicVariableGuid,
+                       EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS |
+                       EFI_VARIABLE_NON_VOLATILE);
+  DeleteVolleyVariable(L"AutoUpdateBrBct", &gNVIDIAPublicVariableGuid,
+                       EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_NON_VOLATILE);
+  DeleteVolleyVariable(L"BootChainFwPrevious", &gNVIDIATokenSpaceGuid,
+                       EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_NON_VOLATILE);
+  DeleteVolleyVariable(L"BootChainFwResetCount", &gNVIDIATokenSpaceGuid,
+                       EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_NON_VOLATILE);
+}
 
 STATIC
 VOID
