@@ -2314,7 +2314,7 @@ ValidateVolleyBootPartition(
 }
 
 /**
-  Select the best boot slot based on metadata.
+  Select the boot slot using fixed priority after validation.
 
   @param[in]  SlotA         Metadata for slot A
   @param[in]  SlotB         Metadata for slot B
@@ -2331,28 +2331,20 @@ SelectBestSlot(
     OUT VOLLEY_BOOT_MODE        *SelectedMode
 )
 {
-    if (SelectedMode == NULL) {
+    if ((SlotA == NULL) || (SlotB == NULL) || (SelectedMode == NULL)) {
         return EFI_INVALID_PARAMETER;
     }
 
-    if (SlotA->Valid && SlotB->Valid) {
-        // Both valid - select higher update_counter
-        if (SlotA->UpdateCounter >= SlotB->UpdateCounter) {
-            DEBUG((DEBUG_INFO, "Volley: Selecting Slot A (counter %u >= %u)\n",
-                   SlotA->UpdateCounter, SlotB->UpdateCounter));
-            *SelectedMode = VOLLEY_MODE_SLOT_A;
-        } else {
-            DEBUG((DEBUG_INFO, "Volley: Selecting Slot B (counter %u > %u)\n",
-                   SlotB->UpdateCounter, SlotA->UpdateCounter));
-            *SelectedMode = VOLLEY_MODE_SLOT_B;
-        }
-        return EFI_SUCCESS;
-    } else if (SlotA->Valid) {
-        DEBUG((DEBUG_INFO, "Volley: Only Slot A is valid\n"));
+    if (SlotA->Valid) {
+        DEBUG((DEBUG_INFO, "Volley: Selecting Slot A (fixed priority, counter %u)\n",
+               SlotA->UpdateCounter));
         *SelectedMode = VOLLEY_MODE_SLOT_A;
         return EFI_SUCCESS;
-    } else if (SlotB->Valid) {
-        DEBUG((DEBUG_INFO, "Volley: Only Slot B is valid\n"));
+    }
+
+    if (SlotB->Valid) {
+        DEBUG((DEBUG_INFO, "Volley: Slot A invalid; selecting Slot B (counter %u)\n",
+               SlotB->UpdateCounter));
         *SelectedMode = VOLLEY_MODE_SLOT_B;
         return EFI_SUCCESS;
     }
@@ -3084,25 +3076,8 @@ Exit:
     return Status;
 }
 
-STATIC
-VOID EFIAPI ForceNonRecoveryBootMode(IN OUT L4T_BOOT_PARAMS* BootParams, IN CONST CHAR8* Reason)
-{
-    if ((BootParams == NULL) || (BootParams->BootMode != NVIDIA_L4T_BOOTMODE_RECOVERY))
-    {
-        return;
-    }
-
-    if (Reason == NULL)
-    {
-        Reason = "unspecified";
-    }
-
-    DEBUG((DEBUG_WARN, "%a: Ignoring recovery boot request (%a)\r\n", __FUNCTION__, Reason));
-    BootParams->BootMode = NVIDIA_L4T_BOOTMODE_GRUB;
-}
-
 /**
-  Process the boot mode selection from command line and variables
+  Initialize deterministic boot parameters.
 
   @param[in]  LoadedImage The
 LoadedImage protocol for this execution
@@ -3116,110 +3091,17 @@ EFI_STATUS
 EFIAPI
 ProcessBootParams(IN EFI_LOADED_IMAGE_PROTOCOL* LoadedImage, OUT L4T_BOOT_PARAMS* BootParams)
 {
-    CONST CHAR16* CurrentBootOption;
-    EFI_STATUS Status;
-    UINT32 BootChain;
-    UINTN DataSize;
-    UINT64 StringValue;
-
     if ((LoadedImage == NULL) || (BootParams == NULL))
     {
         return EFI_INVALID_PARAMETER;
     }
 
+    ZeroMem(BootParams, sizeof(*BootParams));
+    BootParams->BootMode = NVIDIA_L4T_BOOTMODE_DIRECT;
     BootParams->BootChain = 0;
 
-    DataSize = sizeof(BootParams->BootMode);
-    Status = gRT->GetVariable(L4T_BOOTMODE_VARIABLE_NAME, &gNVIDIAPublicVariableGuid, NULL,
-                              &DataSize, &BootParams->BootMode);
-    if (EFI_ERROR(Status) || (BootParams->BootMode > NVIDIA_L4T_BOOTMODE_RECOVERY))
-    {
-        BootParams->BootMode = NVIDIA_L4T_BOOTMODE_GRUB;
-    }
-    ForceNonRecoveryBootMode(BootParams, "NVRAM variable");
-
-    DataSize = sizeof(BootChain);
-    Status = gRT->GetVariable(BOOT_FW_VARIABLE_NAME, &gNVIDIAPublicVariableGuid, NULL, &DataSize,
-                              &BootChain);
-    // If variable does not exist, is >4 bytes or has a value larger than 1, boot partition A
-    if (!EFI_ERROR(Status) && (BootChain <= 1))
-    {
-        BootParams->BootChain = BootChain;
-    }
-
-    // Read current OS boot type to allow for chaining
-    DataSize = sizeof(BootChain);
-    Status = gRT->GetVariable(BOOT_OS_VARIABLE_NAME, &gNVIDIAPublicVariableGuid, NULL, &DataSize,
-                              &BootChain);
-    // If variable does not exist, is >4 bytes or has a value larger than 1, boot partition A
-    if (!EFI_ERROR(Status) && (BootChain <= 1))
-    {
-        BootParams->BootChain = BootChain;
-    }
-
-    if (LoadedImage->LoadOptionsSize)
-    {
-        CurrentBootOption = StrStr(LoadedImage->LoadOptions, BOOTMODE_DIRECT_STRING);
-        if (CurrentBootOption != NULL)
-        {
-            BootParams->BootMode = NVIDIA_L4T_BOOTMODE_DIRECT;
-        }
-
-        CurrentBootOption = StrStr(LoadedImage->LoadOptions, BOOTMODE_GRUB_STRING);
-        if (CurrentBootOption != NULL)
-        {
-            BootParams->BootMode = NVIDIA_L4T_BOOTMODE_GRUB;
-        }
-
-        CurrentBootOption = StrStr(LoadedImage->LoadOptions, BOOTMODE_BOOTIMG_STRING);
-        if (CurrentBootOption != NULL)
-        {
-            BootParams->BootMode = NVIDIA_L4T_BOOTMODE_BOOTIMG;
-        }
-
-        CurrentBootOption = StrStr(LoadedImage->LoadOptions, BOOTMODE_RECOVERY_STRING);
-        if (CurrentBootOption != NULL)
-        {
-            BootParams->BootMode = NVIDIA_L4T_BOOTMODE_RECOVERY;
-            ForceNonRecoveryBootMode(BootParams, "command line");
-        }
-
-        // See if boot option is passed in
-        CurrentBootOption = StrStr(LoadedImage->LoadOptions, BOOTCHAIN_OVERRIDE_STRING);
-        if (CurrentBootOption != NULL)
-        {
-            CurrentBootOption += StrLen(BOOTCHAIN_OVERRIDE_STRING);
-            Status = StrDecimalToUint64S(CurrentBootOption, NULL, &StringValue);
-            if (EFI_ERROR(Status))
-            {
-                ErrorPrint(L"Failed to read boot chain override: %r\r\n", Status);
-            }
-            else if (StringValue <= 1)
-            {
-                BootParams->BootChain = (UINT32)StringValue;
-            }
-            else
-            {
-                ErrorPrint(L"Boot chain override value out of range, ignoring\r\n");
-            }
-        }
-    }
-
-    // Find valid Rootfs Chain. If not, select recovery kernel
-    Status = ValidateRootfsStatus(BootParams);
-    if (EFI_ERROR(Status))
-    {
-        ErrorPrint(L"Failed to validate rootfs status: %r\r\n", Status);
-    }
-
-    // Store the current boot chain in volatile variable to allow chain loading
-    Status = gRT->SetVariable(BOOT_OS_VARIABLE_NAME, &gNVIDIAPublicVariableGuid,
-                              EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
-                              sizeof(BootParams->BootChain), &BootParams->BootChain);
-    if (EFI_ERROR(Status))
-    {
-        ErrorPrint(L"Failed to set OS variable: %r\r\n", Status);
-    }
+    DEBUG((DEBUG_INFO, "%a: using deterministic direct boot path on boot chain A\r\n",
+           __FUNCTION__));
 
     return EFI_SUCCESS;
 }
