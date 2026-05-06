@@ -98,6 +98,26 @@ STATIC EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL mDisabledSimpleTextInEx = {
   DisabledSimpleTextInExUnregisterKeyNotify};
 
 STATIC
+VOID
+EFIAPI
+NopNotify(IN EFI_EVENT Event, IN VOID* Context)
+{
+  (VOID)Event;
+  (VOID)Context;
+}
+
+STATIC
+VOID
+EFIAPI
+OnTextInInstalled(IN EFI_EVENT Event, IN VOID* Context)
+{
+  (VOID)Event;
+  (VOID)Context;
+
+  DisableKeyboardInput();
+}
+
+STATIC
 EFI_STATUS
 InitializeStubEvents(VOID)
 {
@@ -108,7 +128,7 @@ InitializeStubEvents(VOID)
   static VOID* mSimpleTextInExNotifyReg = NULL;
 
   if (mDisabledSimpleTextIn.WaitForKey == NULL) {
-    Status = gBS->CreateEvent(EVT_NOTIFY_WAIT, TPL_CALLBACK, NULL, NULL,
+    Status = gBS->CreateEvent(EVT_NOTIFY_WAIT, TPL_CALLBACK, NopNotify, NULL,
                               &mDisabledSimpleTextIn.WaitForKey);
     if (EFI_ERROR(Status)) {
       return Status;
@@ -116,7 +136,7 @@ InitializeStubEvents(VOID)
   }
 
   if (mDisabledSimpleTextInEx.WaitForKeyEx == NULL) {
-    Status = gBS->CreateEvent(EVT_NOTIFY_WAIT, TPL_CALLBACK, NULL, NULL,
+    Status = gBS->CreateEvent(EVT_NOTIFY_WAIT, TPL_CALLBACK, NopNotify, NULL,
                               &mDisabledSimpleTextInEx.WaitForKeyEx);
     if (EFI_ERROR(Status)) {
       return Status;
@@ -125,8 +145,7 @@ InitializeStubEvents(VOID)
 
   // Register protocol notifications so any late-bound consoles are immediately stubbed.
   if (mSimpleTextInNotifyEvent == NULL) {
-    Status = gBS->CreateEvent(EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
-                              (EFI_EVENT_NOTIFY)DisableKeyboardInput, NULL,
+    Status = gBS->CreateEvent(EVT_NOTIFY_SIGNAL, TPL_CALLBACK, OnTextInInstalled, NULL,
                               &mSimpleTextInNotifyEvent);
     if (!EFI_ERROR(Status)) {
       gBS->RegisterProtocolNotify(&gEfiSimpleTextInProtocolGuid, mSimpleTextInNotifyEvent,
@@ -135,8 +154,7 @@ InitializeStubEvents(VOID)
   }
 
   if (mSimpleTextInExNotifyEvent == NULL) {
-    Status = gBS->CreateEvent(EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
-                              (EFI_EVENT_NOTIFY)DisableKeyboardInput, NULL,
+    Status = gBS->CreateEvent(EVT_NOTIFY_SIGNAL, TPL_CALLBACK, OnTextInInstalled, NULL,
                               &mSimpleTextInExNotifyEvent);
     if (!EFI_ERROR(Status)) {
       gBS->RegisterProtocolNotify(&gEfiSimpleTextInputExProtocolGuid,
@@ -168,6 +186,10 @@ VOID ReplaceSimpleTextInOnHandle(IN EFI_HANDLE Handle)
     return;
   }
 
+  if (Original == &mDisabledSimpleTextIn) {
+    return;
+  }
+
   Status = gBS->ReinstallProtocolInterface(Handle, &gEfiSimpleTextInProtocolGuid, Original,
                                            &mDisabledSimpleTextIn);
   if (EFI_ERROR(Status)) {
@@ -189,6 +211,10 @@ VOID ReplaceSimpleTextInExOnHandle(IN EFI_HANDLE Handle)
 
   Status = gBS->HandleProtocol(Handle, &gEfiSimpleTextInputExProtocolGuid, (VOID**)&Original);
   if (EFI_ERROR(Status)) {
+    return;
+  }
+
+  if (Original == &mDisabledSimpleTextInEx) {
     return;
   }
 
