@@ -15,7 +15,6 @@
   KeyboardSuppress.c
   KeyboardSuppress.h
   VolleyOverrides.c
-  VolleyDtbSelector.c
 
 [Packages]
   MdePkg/MdePkg.dec
@@ -41,7 +40,7 @@
 [Protocols]
   gEfiSimpleTextInProtocolGuid
   gEfiSimpleTextInputExProtocolGuid
-  gNVIDIAEepromProtocolGuid
+  gNVIDIACvmEepromProtocolGuid
 
 [Depex]
   TRUE

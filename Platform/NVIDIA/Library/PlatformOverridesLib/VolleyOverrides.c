@@ -21,6 +21,14 @@
 STATIC
 VOID SetVolleyDtbPath(VOID);
 
+STATIC
+VOID
+EFIAPI
+OnCvmEepromAvailable(IN EFI_EVENT Event, IN VOID *Context);
+
+STATIC EFI_EVENT mCvmEepromNotifyEvent = NULL;
+STATIC VOID      *mCvmEepromNotifyRegistration = NULL;
+
 EFI_STATUS
 EFIAPI
 VolleyOverridesEntry(IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE* SystemTable)
@@ -36,11 +44,47 @@ VolleyOverridesEntry(IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE* SystemTable
 
   SetVolleyDtbPath();
 
+  if (mCvmEepromNotifyEvent == NULL) {
+    Status = gBS->CreateEvent(EVT_NOTIFY_SIGNAL, TPL_CALLBACK, OnCvmEepromAvailable, NULL,
+                              &mCvmEepromNotifyEvent);
+    if (!EFI_ERROR(Status)) {
+      Status = gBS->RegisterProtocolNotify(&gNVIDIACvmEepromProtocolGuid, mCvmEepromNotifyEvent,
+                                           &mCvmEepromNotifyRegistration);
+      if (EFI_ERROR(Status)) {
+        DEBUG((DEBUG_WARN, "%a: Failed to register CVM EEPROM notification: %r\n", __FUNCTION__,
+               Status));
+      }
+    } else {
+      DEBUG((DEBUG_WARN, "%a: Failed to create CVM EEPROM notification: %r\n", __FUNCTION__,
+             Status));
+    }
+  }
+
   return EFI_SUCCESS;
 }
 
 #define VOLLEY_DTB_OVERRIDE_VAR  L"VolleyDtbPath"
 #define VOLLEY_DTB_PROFILE_VAR   L"VolleyDtbProfile"
+#define VOLLEY_DTB_PREFIX        L"EFI\\volley\\dtb\\"
+#define VOLLEY_DTB_AGX           L"tegra194-p2888-0001-p2822-0000.dtb"
+#define VOLLEY_DTB_AGX_INDUSTRIAL L"tegra194-p2888-0008-p2822-0000.dtb"
+
+STATIC
+VOID
+EFIAPI
+OnCvmEepromAvailable(IN EFI_EVENT Event, IN VOID *Context)
+{
+  SetVolleyDtbPath();
+}
+
+STATIC
+BOOLEAN IsIndustrialAgxProductId(CONST CHAR8 *ProductId)
+{
+  return (AsciiStrStr(ProductId, "-0008-") != NULL) ||
+         (AsciiStrStr(ProductId, "p2888-0008") != NULL) ||
+         (AsciiStrStr(ProductId, "P2888-0008") != NULL);
+}
+
 STATIC
 VOID SetVolleyDtbPath(VOID)
 {
@@ -55,14 +99,14 @@ VOID SetVolleyDtbPath(VOID)
 
   ZeroMem(ProductId, sizeof(ProductId));
 
-  Status = gBS->LocateHandleBuffer(ByProtocol, &gNVIDIAEepromProtocolGuid, NULL, &HandleCount,
+  Status = gBS->LocateHandleBuffer(ByProtocol, &gNVIDIACvmEepromProtocolGuid, NULL, &HandleCount,
                                    &Handles);
   if (!EFI_ERROR(Status) && HandleCount > 0) {
-    Status = gBS->HandleProtocol(Handles[0], &gNVIDIAEepromProtocolGuid, (VOID**)&Eeprom);
+    Status = gBS->HandleProtocol(Handles[0], &gNVIDIACvmEepromProtocolGuid, (VOID**)&Eeprom);
     if (!EFI_ERROR(Status) && Eeprom != NULL) {
       CopyMem(ProductId, Eeprom->ProductId,
               MIN(sizeof(ProductId) - 1, sizeof(Eeprom->ProductId)));
-      if (AsciiStrStr(ProductId, "0008") != NULL) {
+      if (IsIndustrialAgxProductId(ProductId)) {
         Industrial = TRUE;
       }
     }
@@ -72,9 +116,8 @@ VOID SetVolleyDtbPath(VOID)
     FreePool(Handles);
   }
 
-  UnicodeSPrint(DtbPath, sizeof(DtbPath), L"EFI\\volley\\dtb\\%s",
-                Industrial ? L"tegra194-p2888-0008-p2822-0000.dtb"
-                           : L"tegra194-p2888-0001-p2822-0000.dtb");
+  UnicodeSPrint(DtbPath, sizeof(DtbPath), VOLLEY_DTB_PREFIX L"%s",
+                Industrial ? VOLLEY_DTB_AGX_INDUSTRIAL : VOLLEY_DTB_AGX);
 
   Status = gRT->SetVariable(VOLLEY_DTB_OVERRIDE_VAR, &gEfiGlobalVariableGuid, Attributes,
                             StrSize(DtbPath), DtbPath);
