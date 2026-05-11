@@ -553,14 +553,6 @@ CONFIG_MEMORY_TEST=n
   gEfiMdeModulePkgTokenSpaceGuid.PcdMaxVariableSize|0x2000
 
   #
-  # FMP PCDs.
-  #
-  gFmpDevicePkgTokenSpaceGuid.PcdFmpDeviceImageIdName|L"NVIDIA System Firmware"
-  gFmpDevicePkgTokenSpaceGuid.PcdFmpDeviceBuildTimeLowestSupportedVersion|0x0
-  gFmpDevicePkgTokenSpaceGuid.PcdFmpDeviceProgressColor|0x0000FF00   # Green=255
-  !include BaseTools/Source/Python/Pkcs7Sign/TestRoot.cer.gFmpDevicePkgTokenSpaceGuid.PcdFmpDevicePkcs7CertBufferXdr.inc
-
-  #
   # SMBIOS entry point version
   #
   gEfiMdeModulePkgTokenSpaceGuid.PcdSmbiosVersion|0x0300
