@@ -55,6 +55,12 @@
 ################################################################################
 
 [PcdsPatchableInModule]
+  # Required by CapsuleRuntimeDxe (kept so DxeCore sees the Capsule arch
+  # protocol). UpdateCapsule is unused on Volley but these PCDs still
+  # need values for the runtime driver to build/link.
+  gEfiMdeModulePkgTokenSpaceGuid.PcdCapsuleOnDiskSupport|TRUE
+  gEfiMdeModulePkgTokenSpaceGuid.PcdCapsuleInRamSupport|TRUE
+  gEfiMdeModulePkgTokenSpaceGuid.PcdMaxSizeNonPopulateCapsule|0xc00000
 
 [PcdsDynamicDefault.common]
   # Console Resolution

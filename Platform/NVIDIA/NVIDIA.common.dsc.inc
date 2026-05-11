@@ -700,6 +700,10 @@ CONFIG_MEMORY_TEST=n
      <LibraryClasses>
        NULL|SecurityPkg/Library/DxeImageVerificationLib/DxeImageVerificationLib.inf
   }
+  # Required: produces gEfiCapsuleArchProtocolGuid (DxeCore asserts on
+  # CoreAllEfiServicesAvailable if missing). UpdateCapsule is unused on
+  # Volley but the arch-protocol contract still has to be satisfied.
+  MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
   MdeModulePkg/Universal/MonotonicCounterRuntimeDxe/MonotonicCounterRuntimeDxe.inf
   MdeModulePkg/Universal/ResetSystemRuntimeDxe/ResetSystemRuntimeDxe.inf
   EmbeddedPkg/RealTimeClockRuntimeDxe/RealTimeClockRuntimeDxe.inf
