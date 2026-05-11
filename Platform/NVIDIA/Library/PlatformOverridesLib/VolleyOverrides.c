@@ -75,7 +75,7 @@ VolleyOverridesEntry(IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE* SystemTable
 #define VOLLEY_DTB_AGX_INDUSTRIAL L"tegra194-p2888-0008-p2822-0000.dtb"
 
 STATIC
-VOID DeleteVolleyVariable(IN CONST CHAR16 *Name, IN EFI_GUID *Guid, IN UINT32 Attributes)
+VOID DeleteVolleyVariable(IN CHAR16 *Name, IN EFI_GUID *Guid, IN UINT32 Attributes)
 {
   EFI_STATUS Status;
 
