@@ -2314,7 +2314,7 @@ ValidateVolleyBootPartition(
 }
 
 /**
-  Select the boot slot using fixed priority after validation.
+  Select the boot slot after validation.
 
   @param[in]  SlotA         Metadata for slot A
   @param[in]  SlotB         Metadata for slot B
@@ -2335,21 +2335,31 @@ SelectBestSlot(
         return EFI_INVALID_PARAMETER;
     }
 
+    if (SlotA->Valid && SlotB->Valid) {
+        if (SlotA->UpdateCounter >= SlotB->UpdateCounter) {
+            DEBUG((DEBUG_INFO, "Volley: Selecting Slot A (counter %u >= %u)\n",
+                   SlotA->UpdateCounter, SlotB->UpdateCounter));
+            *SelectedMode = VOLLEY_MODE_SLOT_A;
+        } else {
+            DEBUG((DEBUG_INFO, "Volley: Selecting Slot B (counter %u > %u)\n",
+                   SlotB->UpdateCounter, SlotA->UpdateCounter));
+            *SelectedMode = VOLLEY_MODE_SLOT_B;
+        }
+        return EFI_SUCCESS;
+    }
+
     if (SlotA->Valid) {
-        DEBUG((DEBUG_INFO, "Volley: Selecting Slot A (fixed priority, counter %u)\n",
-               SlotA->UpdateCounter));
+        DEBUG((DEBUG_INFO, "Volley: Only Slot A is valid\n"));
         *SelectedMode = VOLLEY_MODE_SLOT_A;
         return EFI_SUCCESS;
     }
 
     if (SlotB->Valid) {
-        DEBUG((DEBUG_INFO, "Volley: Slot A invalid; selecting Slot B (counter %u)\n",
-               SlotB->UpdateCounter));
+        DEBUG((DEBUG_INFO, "Volley: Only Slot B is valid\n"));
         *SelectedMode = VOLLEY_MODE_SLOT_B;
         return EFI_SUCCESS;
     }
 
-    // Neither slot is valid
     DEBUG((DEBUG_INFO, "Volley: Both slots invalid, will use install mode\n"));
     return EFI_NOT_FOUND;
 }
