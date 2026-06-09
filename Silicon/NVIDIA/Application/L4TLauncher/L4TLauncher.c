@@ -32,6 +32,7 @@ reserved.
 #include <Protocol/AndroidBootImg.h>
 #include <Protocol/BlockIo.h>
 #include <Protocol/DiskIo.h>
+#include <Protocol/Eeprom.h>
 #include <Protocol/LoadFile2.h>
 #include <Protocol/SimpleFileSystem.h>
 #include <Protocol/PciRootBridgeIo.h>
@@ -60,6 +61,8 @@ reserved.
 
 #define VOLLEY_DTB_OVERRIDE_VAR L"VolleyDtbPath"
 #define VOLLEY_DTB_PROFILE_VAR L"VolleyDtbProfile"
+#define VOLLEY_DTB_AGX_PATH L"EFI\\volley\\dtb\\tegra194-p2888-0001-p2822-0000.dtb"
+#define VOLLEY_DTB_AGX_INDUSTRIAL_PATH L"EFI\\volley\\dtb\\tegra194-p2888-0008-p2822-0000.dtb"
 #define VOLLEY_SYSTEM_NAME L"${VOLLEY_SYSTEM_NAME}"
 
 #ifndef VOLLEY_DIRECT_INITRD_PATH
@@ -1084,11 +1087,111 @@ Exit:
 }
 
 STATIC
+BOOLEAN
+IsIndustrialAgxProductId(CONST CHAR8 *ProductId)
+{
+    CONST TEGRA_EEPROM_PART_NUMBER *Pn;
+
+    if (ProductId == NULL)
+    {
+        return FALSE;
+    }
+
+    // EEPROM part number is 699-<Class><Id>-<Sku>-..., e.g. 699-12888-0008-600.
+    // The class digit varies (8 on devkit modules, 1 on production); ignore it
+    // like NVIDIA's TegraBoardIdFromPartNumber does and match Id + Sku.
+    Pn = &((CONST EEPROM_PART_NUMBER *)ProductId)->TegraEepromPartNumber;
+    return (CompareMem(Pn->Id, "2888", 4) == 0) &&
+           (CompareMem(Pn->Sku, "0008", 4) == 0);
+}
+
+STATIC
+VOID
+LogEepromProductId(UINTN EepromIndex, CONST CHAR8 *ProductId)
+{
+    CHAR16 Hex[(TEGRA_PRODUCT_ID_LEN * 3) + 1];
+    UINTN Pos;
+
+    for (Pos = 0; Pos < TEGRA_PRODUCT_ID_LEN; Pos++)
+    {
+        UnicodeSPrint(&Hex[Pos * 3], sizeof(Hex) - (Pos * 3 * sizeof(CHAR16)), L"%02x ",
+                      (UINTN)((UINT8)ProductId[Pos]));
+    }
+
+    ErrorPrint(L"Volley: CVM EEPROM %u ProductId='%a'\r\n", (UINT32)EepromIndex, ProductId);
+    ErrorPrint(L"Volley: CVM EEPROM %u raw: %s\r\n", (UINT32)EepromIndex, Hex);
+}
+
+STATIC
+BOOLEAN
+TryGetVolleyIndustrialFromEeprom(BOOLEAN* Industrial)
+{
+    EFI_STATUS Status;
+    EFI_HANDLE* Handles = NULL;
+    UINTN HandleCount = 0;
+    UINTN Index;
+    BOOLEAN FoundEeprom = FALSE;
+
+    if (Industrial == NULL)
+    {
+        return FALSE;
+    }
+
+    *Industrial = FALSE;
+
+    Status = gBS->LocateHandleBuffer(ByProtocol, &gNVIDIACvmEepromProtocolGuid, NULL, &HandleCount,
+                                     &Handles);
+    if (EFI_ERROR(Status) || HandleCount == 0)
+    {
+        return FALSE;
+    }
+
+    for (Index = 0; Index < HandleCount; Index++)
+    {
+        TEGRA_EEPROM_BOARD_INFO* Eeprom = NULL;
+        CHAR8 ProductId[TEGRA_PRODUCT_ID_LEN + 1];
+
+        Status = gBS->HandleProtocol(Handles[Index], &gNVIDIACvmEepromProtocolGuid,
+                                     (VOID**)&Eeprom);
+        if (EFI_ERROR(Status) || Eeprom == NULL)
+        {
+            continue;
+        }
+
+        ZeroMem(ProductId, sizeof(ProductId));
+        CopyMem(ProductId, Eeprom->ProductId, MIN(sizeof(ProductId) - 1, sizeof(Eeprom->ProductId)));
+        FoundEeprom = TRUE;
+        LogEepromProductId(Index, ProductId);
+
+        if (IsIndustrialAgxProductId(ProductId))
+        {
+            *Industrial = TRUE;
+            break;
+        }
+    }
+
+    if (Handles != NULL)
+    {
+        FreePool(Handles);
+    }
+
+    return FoundEeprom;
+}
+
+STATIC
 CHAR16* EFIAPI GetVolleyDtbPath(VOID)
 {
     EFI_STATUS Status;
     CHAR16* DtbPath = NULL;
     UINTN Size = 0;
+    BOOLEAN Industrial = FALSE;
+
+    if (TryGetVolleyIndustrialFromEeprom(&Industrial))
+    {
+        CONST CHAR16* EepromDtbPath = Industrial ? VOLLEY_DTB_AGX_INDUSTRIAL_PATH :
+                                                   VOLLEY_DTB_AGX_PATH;
+        return AllocateCopyPool(StrSize(EepromDtbPath), EepromDtbPath);
+    }
 
     Status = gRT->GetVariable(VOLLEY_DTB_OVERRIDE_VAR, &gEfiGlobalVariableGuid, NULL, &Size, NULL);
     if (Status == EFI_BUFFER_TOO_SMALL && Size > sizeof(CHAR16))
@@ -1114,8 +1217,14 @@ BOOLEAN
 VolleyIsIndustrial(VOID)
 {
     EFI_STATUS Status;
+    BOOLEAN Industrial = FALSE;
     UINT8 Profile = 0;
     UINTN Size = sizeof(Profile);
+
+    if (TryGetVolleyIndustrialFromEeprom(&Industrial))
+    {
+        return Industrial;
+    }
 
     Status =
         gRT->GetVariable(VOLLEY_DTB_PROFILE_VAR, &gEfiGlobalVariableGuid, NULL, &Size, &Profile);

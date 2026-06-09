@@ -117,9 +117,18 @@ OnCvmEepromAvailable(IN EFI_EVENT Event, IN VOID *Context)
 STATIC
 BOOLEAN IsIndustrialAgxProductId(CONST CHAR8 *ProductId)
 {
-  return (AsciiStrStr(ProductId, "-0008-") != NULL) ||
-         (AsciiStrStr(ProductId, "p2888-0008") != NULL) ||
-         (AsciiStrStr(ProductId, "P2888-0008") != NULL);
+  CONST TEGRA_EEPROM_PART_NUMBER *Pn;
+
+  if (ProductId == NULL) {
+    return FALSE;
+  }
+
+  // EEPROM part number is 699-<Class><Id>-<Sku>-..., e.g. 699-12888-0008-600.
+  // The class digit varies (8 on devkit modules, 1 on production); ignore it
+  // like NVIDIA's TegraBoardIdFromPartNumber does and match Id + Sku.
+  Pn = &((CONST EEPROM_PART_NUMBER *)ProductId)->TegraEepromPartNumber;
+  return (CompareMem(Pn->Id, "2888", 4) == 0) &&
+         (CompareMem(Pn->Sku, "0008", 4) == 0);
 }
 
 STATIC

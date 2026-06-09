@@ -26,6 +26,7 @@
   EmbeddedPkg/EmbeddedPkg.dec
   MdePkg/MdePkg.dec
   MdeModulePkg/MdeModulePkg.dec
+  NetworkPkg/NetworkPkg.dec
   ShellPkg/ShellPkg.dec
   Silicon/NVIDIA/NVIDIA.dec
   SecurityPkg/SecurityPkg.dec
@@ -72,6 +73,7 @@
   gEfiPkcs7VerifyProtocolGuid
   gEfiSimpleFileSystemProtocolGuid
   gEfiPciRootBridgeIoProtocolGuid
+  gNVIDIACvmEepromProtocolGuid
 
 [UserExtensions.TianoCore."ExtraFiles"]
   L4TLauncherExtra.uni
