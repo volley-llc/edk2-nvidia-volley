@@ -387,7 +387,7 @@ LogFdtStringListProperty(
     INT32 Offset;
     UINT32 Index;
 
-    Value = fdt_getprop(Fdt, NodeOffset, PropertyName, &Length);
+    Value = FdtGetProp(Fdt, NodeOffset, PropertyName, &Length);
     if (Value == NULL || Length <= 0)
     {
         return;
@@ -429,7 +429,7 @@ LogFdtU32ArrayProperty(
     UINTN Count;
     UINTN Index;
 
-    Data = fdt_getprop(Fdt, NodeOffset, PropertyName, &Length);
+    Data = FdtGetProp(Fdt, NodeOffset, PropertyName, &Length);
     if (Data == NULL || Length <= 0 || (Length % sizeof(UINT32)) != 0)
     {
         return;
@@ -439,7 +439,7 @@ LogFdtU32ArrayProperty(
     ErrorPrint(L"  %s:", Label);
     for (Index = 0; Index < Count && Index < 8; Index++)
     {
-        ErrorPrint(L" %x", fdt32_to_cpu(Data[Index]));
+        ErrorPrint(L" %x", Fdt32ToCpu(Data[Index]));
     }
     if (Count > 8)
     {
@@ -463,15 +463,15 @@ LogLoadedFdtDiagnostics(IN VOID* Fdt, IN UINTN FdtSize)
 
     ErrorPrint(L"Volley: Loaded DTB diagnostics:\r\n");
     ErrorPrint(L"  loaded-size: %lu\r\n", FdtSize);
-    ErrorPrint(L"  totalsize:    %u\r\n", (UINT32)fdt_totalsize(Fdt));
+    ErrorPrint(L"  totalsize:    %u\r\n", (UINT32)FdtTotalSize(Fdt));
     LogFdtStringListProperty(Fdt, 0, "model", L"model");
     LogFdtStringListProperty(Fdt, 0, "compatible", L"compatible");
     LogFdtStringListProperty(Fdt, 0, "nvidia,dtsfilename", L"dtsfilename");
 
-    NodeOffset = fdt_path_offset(Fdt, "/ethernet@2490000");
+    NodeOffset = FdtPathOffset(Fdt, "/ethernet@2490000");
     if (NodeOffset < 0)
     {
-        ErrorPrint(L"  ethernet@2490000: missing (%a)\r\n", fdt_strerror(NodeOffset));
+        ErrorPrint(L"  ethernet@2490000: missing (%a)\r\n", FdtStrerror(NodeOffset));
         return;
     }
 
@@ -482,10 +482,10 @@ LogLoadedFdtDiagnostics(IN VOID* Fdt, IN UINTN FdtSize)
     LogFdtU32ArrayProperty(Fdt, NodeOffset, "nvidia,phy-reset-gpio", L"eth.nvidia,phy-reset-gpio");
     LogFdtU32ArrayProperty(Fdt, NodeOffset, "phy-handle", L"eth.phy-handle");
 
-    PhyOffset = fdt_path_offset(Fdt, "/ethernet@2490000/mdio/phy@0");
+    PhyOffset = FdtPathOffset(Fdt, "/ethernet@2490000/mdio/phy@0");
     if (PhyOffset < 0)
     {
-        ErrorPrint(L"  ethernet@2490000/mdio/phy@0: missing (%a)\r\n", fdt_strerror(PhyOffset));
+        ErrorPrint(L"  ethernet@2490000/mdio/phy@0: missing (%a)\r\n", FdtStrerror(PhyOffset));
         return;
     }
 
@@ -797,56 +797,6 @@ UpdateBootConfig (
   return Status;
 }
 
-/**
-  Remove comments and leading trailing whitespace
-
-  @param[in]  InputString
-
-  @returns   Cleaned string
-
-**/
-STATIC
-CHAR16 *
-EFIAPI
-CleanExtLinuxLine (
-  IN CHAR16  *InputString
-  )
-{
-  CHAR16  *CurrentString;
-  CHAR16  *EndSearch;
-  CHAR16  *LastNonSpace;
-
-  // Remove any comments
-  CurrentString = StrStr (InputString, L"#");
-  if (CurrentString != NULL) {
-    *CurrentString = CHAR_NULL;
-  }
-
-  CurrentString = InputString;
-  while ((*CurrentString == L' ') ||
-         (*CurrentString == L'\t'))
-  {
-    CurrentString++;
-  }
-
-  LastNonSpace = CurrentString;
-  EndSearch    = CurrentString;
-  if (*LastNonSpace != CHAR_NULL) {
-    while (*EndSearch != CHAR_NULL) {
-      if ((*EndSearch != L' ') &&
-          (*EndSearch != L'\t'))
-      {
-        LastNonSpace = EndSearch;
-      }
-
-      EndSearch++;
-    }
-
-    LastNonSpace[1] = CHAR_NULL;
-  }
-
-  return CurrentString;
-}
 
 /*
  *
@@ -1429,32 +1379,1589 @@ Exit:
   return Status;
 }
 
+
+//
+// ============================================================================
+// Volley DTB selection (single-SKU: Orin NX 16GB on DSBOARD-ORNX)
+// ============================================================================
+//
+
+/**
+  Return the DTB path to load from the ESP.
+
+  Honors an optional VolleyDtbPath EFI-variable override (set by tooling);
+  otherwise returns the fixed single-SKU path. Caller frees the result.
+**/
+STATIC
+CHAR16* EFIAPI GetVolleyDtbPath(VOID)
+{
+    EFI_STATUS  Status;
+    UINTN       Size = 0;
+    CHAR16      *Path = NULL;
+
+    Status = gRT->GetVariable(VOLLEY_DTB_OVERRIDE_VAR, &gEfiGlobalVariableGuid, NULL, &Size, NULL);
+    if (Status == EFI_BUFFER_TOO_SMALL) {
+        Path = AllocateZeroPool(Size + sizeof(CHAR16));
+        if (Path != NULL) {
+            Status = gRT->GetVariable(VOLLEY_DTB_OVERRIDE_VAR, &gEfiGlobalVariableGuid, NULL, &Size, Path);
+            if (!EFI_ERROR(Status) && (Path[0] != L'\0')) {
+                ErrorPrint(L"Volley: DTB path override: %s\r\n", Path);
+                return Path;
+            }
+
+            FreePool(Path);
+            Path = NULL;
+        }
+    }
+
+    Path = AllocateCopyPool(sizeof(VOLLEY_DTB_ORNX_PATH), VOLLEY_DTB_ORNX_PATH);
+    return Path;
+}
+
 STATIC
 EFI_STATUS
-EFIAPI
-CheckCommandString (
-  IN CHAR16        *CommandLine,
-  IN CONST CHAR16  *Key,
-  OUT CHAR16       **Buffer
-  )
+AllocateBootOptionString(CHAR16** Target, CONST CHAR16* Source)
 {
-  CHAR16  *Value;
+    if (Target == NULL)
+    {
+        return EFI_INVALID_PARAMETER;
+    }
 
-  if (StrnCmp (CommandLine, Key, StrLen (Key)) == 0) {
-    Value = CleanExtLinuxLine (CommandLine + StrLen (Key));
-    if (Buffer != NULL) {
-      *Buffer = AllocateCopyPool (StrSize (Value), Value);
-      if (*Buffer == NULL) {
+    if (Source == NULL)
+    {
+        *Target = NULL;
+        return EFI_SUCCESS;
+    }
+
+    *Target = AllocateCopyPool(StrSize(Source), Source);
+    if (*Target == NULL)
+    {
         return EFI_OUT_OF_RESOURCES;
-      }
     }
 
     return EFI_SUCCESS;
-  }
-
-  return EFI_NOT_FOUND;
 }
 
+#if 1  // NVMe slot selection enabled
+//
+// ============================================================================
+// Volley Boot Mode Detection Functions
+// ============================================================================
+//
+
+#define VOLLEY_HASH_READ_CHUNK_SIZE (1024 * 1024)
+#define VOLLEY_SHA256_DIGEST_SIZE   32
+#define VOLLEY_SHA256_HEX_LEN       64
+
+STATIC
+EFI_STATUS
+TrimAsciiSpan(
+    IN OUT CONST CHAR8 **Start,
+    IN OUT CONST CHAR8 **End
+);
+
+typedef struct {
+    UINT8  Data[64];
+    UINT32 State[8];
+    UINT64 BitLen;
+    UINTN  DataLen;
+} VOLLEY_SHA256_CTX;
+
+STATIC CONST UINT32 mSha256K[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+};
+
+#define ROTR32(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+#define CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
+#define MAJ(x, y, z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
+#define EP0(x) (ROTR32((x), 2) ^ ROTR32((x), 13) ^ ROTR32((x), 22))
+#define EP1(x) (ROTR32((x), 6) ^ ROTR32((x), 11) ^ ROTR32((x), 25))
+#define SIG0(x) (ROTR32((x), 7) ^ ROTR32((x), 18) ^ ((x) >> 3))
+#define SIG1(x) (ROTR32((x), 17) ^ ROTR32((x), 19) ^ ((x) >> 10))
+
+STATIC
+VOID
+VolleySha256Transform(
+    IN OUT VOLLEY_SHA256_CTX *Ctx,
+    IN CONST UINT8           Data[64]
+)
+{
+    UINT32 A;
+    UINT32 B;
+    UINT32 C;
+    UINT32 D;
+    UINT32 E;
+    UINT32 F;
+    UINT32 G;
+    UINT32 H;
+    UINT32 T1;
+    UINT32 T2;
+    UINT32 W[64];
+    UINTN  I;
+
+    for (I = 0; I < 16; I++) {
+        W[I] = ((UINT32)Data[I * 4] << 24) |
+               ((UINT32)Data[I * 4 + 1] << 16) |
+               ((UINT32)Data[I * 4 + 2] << 8) |
+               ((UINT32)Data[I * 4 + 3]);
+    }
+
+    for (I = 16; I < 64; I++) {
+        W[I] = SIG1(W[I - 2]) + W[I - 7] + SIG0(W[I - 15]) + W[I - 16];
+    }
+
+    A = Ctx->State[0];
+    B = Ctx->State[1];
+    C = Ctx->State[2];
+    D = Ctx->State[3];
+    E = Ctx->State[4];
+    F = Ctx->State[5];
+    G = Ctx->State[6];
+    H = Ctx->State[7];
+
+    for (I = 0; I < 64; I++) {
+        T1 = H + EP1(E) + CH(E, F, G) + mSha256K[I] + W[I];
+        T2 = EP0(A) + MAJ(A, B, C);
+        H = G;
+        G = F;
+        F = E;
+        E = D + T1;
+        D = C;
+        C = B;
+        B = A;
+        A = T1 + T2;
+    }
+
+    Ctx->State[0] += A;
+    Ctx->State[1] += B;
+    Ctx->State[2] += C;
+    Ctx->State[3] += D;
+    Ctx->State[4] += E;
+    Ctx->State[5] += F;
+    Ctx->State[6] += G;
+    Ctx->State[7] += H;
+}
+
+STATIC
+VOID
+VolleySha256Init(
+    IN OUT VOLLEY_SHA256_CTX *Ctx
+)
+{
+    Ctx->DataLen = 0;
+    Ctx->BitLen = 0;
+    Ctx->State[0] = 0x6a09e667;
+    Ctx->State[1] = 0xbb67ae85;
+    Ctx->State[2] = 0x3c6ef372;
+    Ctx->State[3] = 0xa54ff53a;
+    Ctx->State[4] = 0x510e527f;
+    Ctx->State[5] = 0x9b05688c;
+    Ctx->State[6] = 0x1f83d9ab;
+    Ctx->State[7] = 0x5be0cd19;
+}
+
+STATIC
+VOID
+VolleySha256Update(
+    IN OUT VOLLEY_SHA256_CTX *Ctx,
+    IN CONST UINT8           *Data,
+    IN UINTN                 Len
+)
+{
+    UINTN I;
+
+    for (I = 0; I < Len; I++) {
+        Ctx->Data[Ctx->DataLen++] = Data[I];
+        if (Ctx->DataLen == sizeof(Ctx->Data)) {
+            VolleySha256Transform(Ctx, Ctx->Data);
+            Ctx->BitLen += 512;
+            Ctx->DataLen = 0;
+        }
+    }
+}
+
+STATIC
+VOID
+VolleySha256Final(
+    IN OUT VOLLEY_SHA256_CTX *Ctx,
+    OUT UINT8                *Digest
+)
+{
+    UINTN I;
+    UINT64 BitLen;
+
+    BitLen = Ctx->BitLen + ((UINT64)Ctx->DataLen * 8);
+
+    Ctx->Data[Ctx->DataLen++] = 0x80;
+    if (Ctx->DataLen > 56) {
+        SetMem(Ctx->Data + Ctx->DataLen, 64 - Ctx->DataLen, 0);
+        VolleySha256Transform(Ctx, Ctx->Data);
+        Ctx->DataLen = 0;
+    }
+
+    SetMem(Ctx->Data + Ctx->DataLen, 56 - Ctx->DataLen, 0);
+    Ctx->Data[56] = (UINT8)(BitLen >> 56);
+    Ctx->Data[57] = (UINT8)(BitLen >> 48);
+    Ctx->Data[58] = (UINT8)(BitLen >> 40);
+    Ctx->Data[59] = (UINT8)(BitLen >> 32);
+    Ctx->Data[60] = (UINT8)(BitLen >> 24);
+    Ctx->Data[61] = (UINT8)(BitLen >> 16);
+    Ctx->Data[62] = (UINT8)(BitLen >> 8);
+    Ctx->Data[63] = (UINT8)(BitLen);
+    VolleySha256Transform(Ctx, Ctx->Data);
+
+    for (I = 0; I < 8; I++) {
+        Digest[I * 4] = (UINT8)(Ctx->State[I] >> 24);
+        Digest[I * 4 + 1] = (UINT8)(Ctx->State[I] >> 16);
+        Digest[I * 4 + 2] = (UINT8)(Ctx->State[I] >> 8);
+        Digest[I * 4 + 3] = (UINT8)(Ctx->State[I]);
+    }
+}
+
+STATIC
+INTN
+HexCharToNibble(
+    IN CHAR8 C
+)
+{
+    if (C >= '0' && C <= '9') {
+        return C - '0';
+    }
+    if (C >= 'a' && C <= 'f') {
+        return 10 + (C - 'a');
+    }
+    if (C >= 'A' && C <= 'F') {
+        return 10 + (C - 'A');
+    }
+    return -1;
+}
+
+STATIC
+EFI_STATUS
+ParseSha256DigestSpan(
+    IN  CONST CHAR8 *Start,
+    IN  CONST CHAR8 *End,
+    OUT UINT8       *Digest
+)
+{
+    UINTN Index;
+    INTN  Hi;
+    INTN  Lo;
+
+    if (Start == NULL || End == NULL || Digest == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    if ((End <= Start) || ((End - Start) != VOLLEY_SHA256_HEX_LEN)) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    for (Index = 0; Index < VOLLEY_SHA256_DIGEST_SIZE; Index++) {
+        Hi = HexCharToNibble(Start[Index * 2]);
+        Lo = HexCharToNibble(Start[Index * 2 + 1]);
+        if (Hi < 0 || Lo < 0) {
+            return EFI_INVALID_PARAMETER;
+        }
+        Digest[Index] = (UINT8)((Hi << 4) | Lo);
+    }
+
+    return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+ParseSlotCheckEntry(
+    IN  CONST CHAR8         *Value,
+    IN  VOLLEY_SLOT_META    *SlotMeta
+)
+{
+    CONST CHAR8 *ValueStart;
+    CONST CHAR8 *ValueEnd;
+    CONST CHAR8 *AlgStart;
+    CONST CHAR8 *AlgEnd;
+    CONST CHAR8 *DigestStart;
+    CONST CHAR8 *DigestEnd;
+    CONST CHAR8 *PathStart;
+    CONST CHAR8 *PathEnd;
+    CONST CHAR8 *Comma;
+    CONST CHAR8 *Comma2;
+    CHAR8        Alg[16];
+    CHAR8        PathAscii[VOLLEY_MAX_CHECK_PATH_CHARS];
+    UINTN        AlgLen;
+    UINTN        PathLen;
+    EFI_STATUS   Status;
+    RETURN_STATUS StrStatus;
+    VOLLEY_SLOT_META *Meta;
+    UINT8        Digest[VOLLEY_SHA256_DIGEST_SIZE];
+
+    if (Value == NULL || SlotMeta == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    Meta = SlotMeta;
+    if (Meta->CheckCount >= VOLLEY_MAX_CHECKS) {
+        return EFI_BUFFER_TOO_SMALL;
+    }
+
+    ValueStart = Value;
+    ValueEnd = Value + AsciiStrLen(Value);
+    TrimAsciiSpan(&ValueStart, &ValueEnd);
+    if (ValueEnd <= ValueStart) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    AlgStart = ValueStart;
+    Comma = AlgStart;
+    while (Comma < ValueEnd && *Comma != ',') {
+        Comma++;
+    }
+    if (Comma >= ValueEnd) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    AlgEnd = Comma;
+    TrimAsciiSpan(&AlgStart, &AlgEnd);
+    AlgLen = (UINTN)(AlgEnd - AlgStart);
+    if (AlgLen == 0 || AlgLen >= sizeof(Alg)) {
+        return EFI_INVALID_PARAMETER;
+    }
+    CopyMem(Alg, AlgStart, AlgLen);
+    Alg[AlgLen] = '\0';
+
+    if (AsciiStriCmp(Alg, "sha256") != 0) {
+        return EFI_UNSUPPORTED;
+    }
+
+    DigestStart = Comma + 1;
+    Comma2 = DigestStart;
+    while (Comma2 < ValueEnd && *Comma2 != ',') {
+        Comma2++;
+    }
+    if (Comma2 >= ValueEnd) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    DigestEnd = Comma2;
+    TrimAsciiSpan(&DigestStart, &DigestEnd);
+    Status = ParseSha256DigestSpan(DigestStart, DigestEnd, Digest);
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
+
+    PathStart = Comma2 + 1;
+    PathEnd = ValueEnd;
+    TrimAsciiSpan(&PathStart, &PathEnd);
+    PathLen = (UINTN)(PathEnd - PathStart);
+    if (PathLen == 0 || PathLen >= sizeof(PathAscii)) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    CopyMem(PathAscii, PathStart, PathLen);
+    PathAscii[PathLen] = '\0';
+
+    Meta->Checks[Meta->CheckCount].Valid = TRUE;
+    CopyMem(Meta->Checks[Meta->CheckCount].Sha256, Digest, sizeof(Digest));
+    StrStatus = AsciiStrToUnicodeStrS(PathAscii, Meta->Checks[Meta->CheckCount].Path,
+                                      VOLLEY_MAX_CHECK_PATH_CHARS);
+    if (RETURN_ERROR(StrStatus)) {
+        Meta->Checks[Meta->CheckCount].Valid = FALSE;
+        return EFI_INVALID_PARAMETER;
+    }
+
+    Meta->CheckCount++;
+    return EFI_SUCCESS;
+}
+
+/**
+  Parse a key=value configuration file and invoke callback for each pair.
+
+  Handles:
+  - Lines starting with '#' (comments, ignored)
+  - Empty lines (ignored)
+  - Both \r\n (Windows) and \n (Unix) line endings
+  - No spaces around '=' sign expected
+
+  @param[in]  Buffer      ASCII file content
+  @param[in]  BufferSize  Size of buffer in bytes
+  @param[in]  Callback    Function to call for each key=value pair
+  @param[in]  Context     User context passed to callback
+
+  @retval EFI_SUCCESS     File parsed successfully
+**/
+STATIC
+EFI_STATUS
+TrimAsciiSpan(
+    IN OUT CONST CHAR8 **Start,
+    IN OUT CONST CHAR8 **End
+)
+{
+    const CHAR8 *S;
+    const CHAR8 *E;
+
+    if (Start == NULL || End == NULL || *Start == NULL || *End == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    S = *Start;
+    E = *End;
+
+    while (S < E && (*S == ' ' || *S == '\t')) {
+        S++;
+    }
+
+    while (E > S && (E[-1] == ' ' || E[-1] == '\t')) {
+        E--;
+    }
+
+    *Start = S;
+    *End = E;
+    return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+ParseKeyValueFile(
+    IN  CONST CHAR8     *Buffer,
+    IN  UINTN           BufferSize,
+    IN  EFI_STATUS      (*Callback)(CONST CHAR8 *Key, CONST CHAR8 *Value, VOID *Context),
+    IN  VOID            *Context
+)
+{
+    CONST CHAR8 *LineStart;
+    CONST CHAR8 *LineEnd;
+    CONST CHAR8 *BufferEnd;
+    CONST CHAR8 *Equals;
+    CONST CHAR8 *KeyStart;
+    CONST CHAR8 *KeyEnd;
+    CONST CHAR8 *ValueStart;
+    CONST CHAR8 *ValueEnd;
+    CONST CHAR8 *Comment;
+    CHAR8       Key[64];
+    CHAR8       Value[256];
+    UINTN       KeyLen;
+    UINTN       ValueLen;
+    EFI_STATUS  Status;
+
+    if (Buffer == NULL || BufferSize == 0 || Callback == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    BufferEnd = Buffer + BufferSize;
+    LineStart = Buffer;
+
+    while (LineStart < BufferEnd) {
+        // Find end of line
+        LineEnd = LineStart;
+        while (LineEnd < BufferEnd && *LineEnd != '\n' && *LineEnd != '\r') {
+            LineEnd++;
+        }
+
+        // Skip empty lines and comments
+        KeyStart = LineStart;
+        KeyEnd = LineEnd;
+        TrimAsciiSpan(&KeyStart, &KeyEnd);
+        if (KeyEnd > KeyStart && *KeyStart != '#') {
+            // Find '=' separator
+            Equals = KeyStart;
+            while (Equals < KeyEnd && *Equals != '=') {
+                Equals++;
+            }
+
+            if (Equals < KeyEnd && Equals > KeyStart) {
+                // Extract key
+                KeyStart = KeyStart;
+                KeyEnd = Equals;
+                TrimAsciiSpan(&KeyStart, &KeyEnd);
+                KeyLen = (UINTN)(KeyEnd - KeyStart);
+                if (KeyLen >= sizeof(Key)) {
+                    KeyLen = sizeof(Key) - 1;
+                }
+                CopyMem(Key, KeyStart, KeyLen);
+                Key[KeyLen] = '\0';
+
+                // Extract value
+                ValueStart = Equals + 1;
+                ValueEnd = LineEnd;
+                TrimAsciiSpan(&ValueStart, &ValueEnd);
+
+                // Strip inline comments in value
+                Comment = ValueStart;
+                while (Comment < ValueEnd && *Comment != '#') {
+                    Comment++;
+                }
+                if (Comment < ValueEnd) {
+                    ValueEnd = Comment;
+                    TrimAsciiSpan(&ValueStart, &ValueEnd);
+                }
+
+                ValueLen = (UINTN)(ValueEnd - ValueStart);
+                if (ValueLen >= sizeof(Value)) {
+                    ValueLen = sizeof(Value) - 1;
+                }
+                CopyMem(Value, ValueStart, ValueLen);
+                Value[ValueLen] = '\0';
+
+                // Call callback
+                Status = Callback(Key, Value, Context);
+                if (EFI_ERROR(Status)) {
+                    return Status;
+                }
+            }
+        }
+
+        // Move to next line
+        LineStart = LineEnd;
+        if (LineStart < BufferEnd && *LineStart == '\r') {
+            LineStart++;
+        }
+        if (LineStart < BufferEnd && *LineStart == '\n') {
+            LineStart++;
+        }
+    }
+
+    return EFI_SUCCESS;
+}
+
+/**
+  Callback for parsing boot_config.txt - extracts expected_nvme_uuid
+**/
+STATIC
+EFI_STATUS
+BootConfigCallback(
+    IN  CONST CHAR8     *Key,
+    IN  CONST CHAR8     *Value,
+    IN  VOID            *Context
+)
+{
+    VOLLEY_BOOT_CONFIG  *Config = (VOLLEY_BOOT_CONFIG *)Context;
+    RETURN_STATUS       ReturnStatus;
+    CHAR16              UuidStr[64];
+
+    if (AsciiStrCmp(Key, "expected_nvme_uuid") == 0) {
+        // Convert ASCII to Unicode for GUID parsing
+        AsciiStrToUnicodeStrS(Value, UuidStr, sizeof(UuidStr) / sizeof(CHAR16));
+
+        // Parse the GUID string
+        ReturnStatus = StrToGuid(UuidStr, &Config->ExpectedNvmeUuid);
+        if (!RETURN_ERROR(ReturnStatus)) {
+            Config->Valid = TRUE;
+            DEBUG((DEBUG_INFO, "Volley: Parsed expected_nvme_uuid: %g\n", &Config->ExpectedNvmeUuid));
+        } else {
+            DEBUG((DEBUG_ERROR, "Volley: Failed to parse UUID: %a\n", Value));
+        }
+    }
+
+    return EFI_SUCCESS;
+}
+
+/**
+  Read and parse /boot_config.txt from eMMC ESP partition.
+
+  @param[in]  EspHandle   Handle to ESP partition
+  @param[out] Config      Parsed configuration
+
+  @retval EFI_SUCCESS     Configuration read and parsed successfully
+  @retval EFI_NOT_FOUND   File not found
+  @retval Other           Read or parse error
+**/
+STATIC
+EFI_STATUS
+ReadVolleyBootConfig(
+    IN  EFI_HANDLE          EspHandle,
+    OUT VOLLEY_BOOT_CONFIG  *Config
+)
+{
+    EFI_STATUS  Status;
+    VOID        *FileData = NULL;
+    UINT64      FileSize = 0;
+
+    if (Config == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    ZeroMem(Config, sizeof(VOLLEY_BOOT_CONFIG));
+    Config->Valid = FALSE;
+
+    // Read boot_config.txt from ESP
+    Status = OpenAndReadUntrustedFileToBuffer(
+        EspHandle,
+        VOLLEY_BOOT_CONFIG_PATH,
+        NULL,
+        &FileData,
+        &FileSize
+    );
+
+    if (EFI_ERROR(Status)) {
+        DEBUG((DEBUG_INFO, "Volley: boot_config.txt not found or unreadable: %r\n", Status));
+        return Status;
+    }
+
+    if (FileData == NULL || FileSize == 0) {
+        DEBUG((DEBUG_INFO, "Volley: boot_config.txt is empty\n"));
+        return EFI_NOT_FOUND;
+    }
+
+    // Parse the file
+    Status = ParseKeyValueFile((CHAR8 *)FileData, (UINTN)FileSize, BootConfigCallback, Config);
+
+    FreePool(FileData);
+
+    if (!Config->Valid) {
+        DEBUG((DEBUG_INFO, "Volley: boot_config.txt missing expected_nvme_uuid\n"));
+        return EFI_NOT_FOUND;
+    }
+
+    return EFI_SUCCESS;
+}
+
+/**
+  Connect all PCI root bridges to enumerate PCI devices including NVMe.
+
+  This is necessary before attempting to find NVMe devices, as they may
+  not be visible until the PCI bus driver connects the root bridges.
+**/
+STATIC
+VOID
+ConnectPciRootBridges(
+    VOID
+)
+{
+    EFI_STATUS  Status;
+    EFI_HANDLE  *Handles = NULL;
+    UINTN       NumHandles;
+    UINTN       Index;
+
+    // Locate all PCI root bridge handles
+    Status = gBS->LocateHandleBuffer(
+        ByProtocol,
+        &gEfiPciRootBridgeIoProtocolGuid,
+        NULL,
+        &NumHandles,
+        &Handles
+    );
+
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: No PCI root bridges found: %r\r\n", Status);
+        return;
+    }
+
+    ErrorPrint(L"Volley: Connecting %u PCI root bridge(s)...\r\n", NumHandles);
+
+    // Connect each root bridge to enumerate PCI devices
+    for (Index = 0; Index < NumHandles; Index++) {
+        Status = gBS->ConnectController(
+            Handles[Index],
+            NULL,   // DriverImageHandle - use all available drivers
+            NULL,   // RemainingDevicePath - produce all children
+            TRUE    // Recursive - connect all child controllers
+        );
+        if (EFI_ERROR(Status)) {
+            DEBUG((DEBUG_WARN, "Volley: Failed to connect PCI root bridge %u: %r\n", Index, Status));
+        }
+    }
+
+    FreePool(Handles);
+    ErrorPrint(L"Volley: PCI enumeration complete\r\n");
+}
+
+/**
+  Find NVMe disk device by enumerating Block I/O protocol handles.
+
+  @param[out] BlockIo       Block I/O protocol for NVMe disk
+  @param[out] DeviceHandle  Handle for NVMe device
+
+  @retval EFI_SUCCESS       NVMe device found
+  @retval EFI_NOT_FOUND     No NVMe device present
+**/
+STATIC
+EFI_STATUS
+FindNvmeDevice(
+    OUT EFI_BLOCK_IO_PROTOCOL   **BlockIo,
+    OUT EFI_HANDLE              *DeviceHandle
+)
+{
+    EFI_STATUS                  Status;
+    UINTN                       NumHandles;
+    EFI_HANDLE                  *HandleBuffer = NULL;
+    UINTN                       Index;
+    EFI_BLOCK_IO_PROTOCOL       *TempBlockIo;
+    EFI_DEVICE_PATH_PROTOCOL    *DevicePath;
+    EFI_DEVICE_PATH_PROTOCOL    *Node;
+
+    if (BlockIo == NULL || DeviceHandle == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    *BlockIo = NULL;
+    *DeviceHandle = NULL;
+
+    // Get all Block I/O handles
+    Status = gBS->LocateHandleBuffer(
+        ByProtocol,
+        &gEfiBlockIoProtocolGuid,
+        NULL,
+        &NumHandles,
+        &HandleBuffer
+    );
+
+    if (EFI_ERROR(Status)) {
+        DEBUG((DEBUG_INFO, "Volley: No Block I/O devices found\n"));
+        return Status;
+    }
+
+    DEBUG((DEBUG_INFO, "Volley: Found %u Block I/O handles\n", NumHandles));
+
+    for (Index = 0; Index < NumHandles; Index++) {
+        // Get Block I/O protocol
+        Status = gBS->HandleProtocol(
+            HandleBuffer[Index],
+            &gEfiBlockIoProtocolGuid,
+            (VOID **)&TempBlockIo
+        );
+        if (EFI_ERROR(Status)) {
+            continue;
+        }
+
+        // Skip partitions - we want the whole disk
+        if (TempBlockIo->Media->LogicalPartition) {
+            continue;
+        }
+
+        // Get device path
+        Status = gBS->HandleProtocol(
+            HandleBuffer[Index],
+            &gEfiDevicePathProtocolGuid,
+            (VOID **)&DevicePath
+        );
+        if (EFI_ERROR(Status)) {
+            continue;
+        }
+
+        // Walk device path looking for NVMe node
+        Node = DevicePath;
+        while (!IsDevicePathEnd(Node)) {
+            if (DevicePathType(Node) == MESSAGING_DEVICE_PATH &&
+                DevicePathSubType(Node) == MSG_NVME_NAMESPACE_DP) {
+                // Found NVMe device
+                DEBUG((DEBUG_INFO, "Volley: Found NVMe device at handle index %u\n", Index));
+                *BlockIo = TempBlockIo;
+                *DeviceHandle = HandleBuffer[Index];
+                FreePool(HandleBuffer);
+                return EFI_SUCCESS;
+            }
+            Node = NextDevicePathNode(Node);
+        }
+    }
+
+    FreePool(HandleBuffer);
+    DEBUG((DEBUG_INFO, "Volley: No NVMe device found\n"));
+    return EFI_NOT_FOUND;
+}
+
+/**
+  Read GPT header from device and extract DiskGUID.
+
+  @param[in]  BlockIo     Block I/O protocol for device
+  @param[out] DiskGuid    The GPT Disk GUID
+
+  @retval EFI_SUCCESS         GUID read successfully
+  @retval EFI_VOLUME_CORRUPTED Invalid GPT header
+**/
+STATIC
+EFI_STATUS
+ReadNvmeDiskGuid(
+    IN  EFI_BLOCK_IO_PROTOCOL   *BlockIo,
+    OUT EFI_GUID                *DiskGuid
+)
+{
+    EFI_STATUS                  Status;
+    VOID                        *Buffer = NULL;
+    UINT32                      BlockSize;
+    EFI_PARTITION_TABLE_HEADER  *GptHeader;
+
+    if (BlockIo == NULL || DiskGuid == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    BlockSize = BlockIo->Media->BlockSize;
+
+    // Allocate buffer for GPT header (LBA 1)
+    Buffer = AllocatePool(BlockSize);
+    if (Buffer == NULL) {
+        return EFI_OUT_OF_RESOURCES;
+    }
+
+    // Read LBA 1 (primary GPT header)
+    Status = BlockIo->ReadBlocks(
+        BlockIo,
+        BlockIo->Media->MediaId,
+        1,  // GPT header is at LBA 1
+        BlockSize,
+        Buffer
+    );
+
+    if (EFI_ERROR(Status)) {
+        DEBUG((DEBUG_ERROR, "Volley: Failed to read GPT header: %r\n", Status));
+        FreePool(Buffer);
+        return Status;
+    }
+
+    GptHeader = (EFI_PARTITION_TABLE_HEADER *)Buffer;
+
+    // Validate GPT signature
+    if (GptHeader->Header.Signature != EFI_PTAB_HEADER_ID) {
+        DEBUG((DEBUG_ERROR, "Volley: Invalid GPT signature\n"));
+        FreePool(Buffer);
+        return EFI_VOLUME_CORRUPTED;
+    }
+
+    // Extract DiskGUID
+    CopyGuid(DiskGuid, &GptHeader->DiskGUID);
+    DEBUG((DEBUG_INFO, "Volley: NVMe Disk GUID: %g\n", DiskGuid));
+
+    FreePool(Buffer);
+    return EFI_SUCCESS;
+}
+
+/**
+  Find an NVMe partition handle by GPT partition name (ornx layout:
+  VOLLEY_A / VOLLEY_B slots and the APP installer partition all live on the
+  single NVMe disk and are identified by name, not index).
+
+  @param[in]  NvmeDeviceHandle  Handle to parent NVMe device
+  @param[in]  PartitionName     GPT partition name to find
+  @param[out] PartitionHandle   Handle for the partition
+
+  @retval EFI_SUCCESS       Partition found
+  @retval EFI_NOT_FOUND     Partition not found
+**/
+STATIC
+EFI_STATUS
+FindNvmePartitionByName(
+    IN  EFI_HANDLE      NvmeDeviceHandle,
+    IN  CONST CHAR16    *PartitionName,
+    OUT EFI_HANDLE      *PartitionHandle
+)
+{
+    EFI_STATUS                  Status;
+    UINTN                       NumHandles;
+    EFI_HANDLE                  *HandleBuffer = NULL;
+    UINTN                       Index;
+    EFI_PARTITION_INFO_PROTOCOL *PartitionInfo;
+    EFI_DEVICE_PATH_PROTOCOL    *ParentPath;
+    EFI_DEVICE_PATH_PROTOCOL    *ChildPath;
+    UINTN                       ParentPathSize;
+
+    if ((PartitionHandle == NULL) || (PartitionName == NULL)) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    *PartitionHandle = NULL;
+
+    // Get parent device path
+    Status = gBS->HandleProtocol(
+        NvmeDeviceHandle,
+        &gEfiDevicePathProtocolGuid,
+        (VOID **)&ParentPath
+    );
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
+    ParentPathSize = GetDevicePathSize(ParentPath) - sizeof(EFI_DEVICE_PATH_PROTOCOL);
+
+    // Get all partition info handles
+    Status = gBS->LocateHandleBuffer(
+        ByProtocol,
+        &gEfiPartitionInfoProtocolGuid,
+        NULL,
+        &NumHandles,
+        &HandleBuffer
+    );
+
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
+
+    for (Index = 0; Index < NumHandles; Index++) {
+        Status = gBS->HandleProtocol(
+            HandleBuffer[Index],
+            &gEfiPartitionInfoProtocolGuid,
+            (VOID **)&PartitionInfo
+        );
+        if (EFI_ERROR(Status)) {
+            continue;
+        }
+
+        if (PartitionInfo->Type != PARTITION_TYPE_GPT) {
+            continue;
+        }
+
+        // Only partitions on the same disk (child device path under parent)
+        Status = gBS->HandleProtocol(
+            HandleBuffer[Index],
+            &gEfiDevicePathProtocolGuid,
+            (VOID **)&ChildPath
+        );
+        if (EFI_ERROR(Status)) {
+            continue;
+        }
+
+        if (CompareMem(ChildPath, ParentPath, ParentPathSize) != 0) {
+            continue;
+        }
+
+        if (StrCmp(PartitionInfo->Info.Gpt.PartitionName, PartitionName) == 0) {
+            DEBUG((DEBUG_INFO, "Volley: Found NVMe partition %s\n", PartitionName));
+            *PartitionHandle = HandleBuffer[Index];
+            FreePool(HandleBuffer);
+            return EFI_SUCCESS;
+        }
+    }
+
+    FreePool(HandleBuffer);
+    DEBUG((DEBUG_INFO, "Volley: NVMe partition %s not found\n", PartitionName));
+    return EFI_NOT_FOUND;
+}
+
+/**
+  Callback for parsing slot_meta.txt - extracts update_counter and valid flag
+**/
+STATIC
+EFI_STATUS
+SlotMetaCallback(
+    IN  CONST CHAR8     *Key,
+    IN  CONST CHAR8     *Value,
+    IN  VOID            *Context
+)
+{
+    VOLLEY_SLOT_META *SlotMeta = (VOLLEY_SLOT_META *)Context;
+    EFI_STATUS        Status;
+
+    if (AsciiStrCmp(Key, "update_counter") == 0) {
+        SlotMeta->UpdateCounter = (UINT32)AsciiStrDecimalToUintn(Value);
+        DEBUG((DEBUG_INFO, "Volley: Parsed update_counter=%u\n", SlotMeta->UpdateCounter));
+    } else if (AsciiStrCmp(Key, "valid") == 0) {
+        if (AsciiStrCmp(Value, "1") == 0) {
+            SlotMeta->Valid = TRUE;
+            DEBUG((DEBUG_INFO, "Volley: Slot is valid\n"));
+        }
+    } else if (AsciiStrCmp(Key, "check") == 0) {
+        Status = ParseSlotCheckEntry(Value, SlotMeta);
+        if (EFI_ERROR(Status)) {
+            SlotMeta->ParseError = TRUE;
+            ErrorPrint(L"Volley: Invalid check entry in slot_meta.txt\r\n");
+        }
+    }
+
+    return EFI_SUCCESS;
+}
+
+/**
+  Read and parse /slot_meta.txt from NVMe partition.
+
+  @param[in]  PartitionHandle   Handle to FAT32 partition
+  @param[out] SlotMeta          Parsed slot metadata
+
+  @retval EFI_SUCCESS       Metadata read and parsed successfully
+  @retval EFI_NOT_FOUND     File not found or slot invalid
+**/
+STATIC
+EFI_STATUS
+ReadSlotMetadata(
+    IN  EFI_HANDLE          PartitionHandle,
+    OUT VOLLEY_SLOT_META    *SlotMeta
+)
+{
+    EFI_STATUS  Status;
+    VOID        *FileData = NULL;
+    UINT64      FileSize = 0;
+
+    if (SlotMeta == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    ZeroMem(SlotMeta, sizeof(VOLLEY_SLOT_META));
+    SlotMeta->ParseError = FALSE;
+    SlotMeta->Valid = FALSE;
+    SlotMeta->UpdateCounter = 0;
+    SlotMeta->CheckCount = 0;
+
+    // Read slot_meta.txt from partition
+    Status = OpenAndReadUntrustedFileToBuffer(
+        PartitionHandle,
+        VOLLEY_SLOT_META_PATH,
+        NULL,
+        &FileData,
+        &FileSize
+    );
+
+    if (EFI_ERROR(Status)) {
+        DEBUG((DEBUG_INFO, "Volley: slot_meta.txt not found: %r\n", Status));
+        return Status;
+    }
+
+    if (FileData == NULL || FileSize == 0) {
+        DEBUG((DEBUG_INFO, "Volley: slot_meta.txt is empty\n"));
+        return EFI_NOT_FOUND;
+    }
+
+    // Parse the file
+    Status = ParseKeyValueFile((CHAR8 *)FileData, (UINTN)FileSize, SlotMetaCallback, SlotMeta);
+
+    FreePool(FileData);
+
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
+
+    if (SlotMeta->ParseError) {
+        SlotMeta->Valid = FALSE;
+    }
+
+    if (!SlotMeta->Valid) {
+        DEBUG((DEBUG_INFO, "Volley: Slot marked as invalid (valid != 1)\n"));
+    }
+
+    return EFI_SUCCESS;
+}
+
+STATIC
+EFI_STATUS
+HashFileSha256(
+    IN  EFI_HANDLE      PartitionHandle,
+    IN  CONST CHAR16    *FileName,
+    OUT UINT8           *Digest
+)
+{
+    EFI_STATUS      Status = EFI_SUCCESS;
+    EFI_DEVICE_PATH *DevicePath = NULL;
+    EFI_DEVICE_PATH *NextDevicePath;
+    EFI_FILE_HANDLE Handle = NULL;
+    VOLLEY_SHA256_CTX Ctx;
+    UINT8            *Buffer = NULL;
+    UINTN            ReadSize;
+
+    if (FileName == NULL || Digest == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    DevicePath = FileDevicePath(PartitionHandle, FileName);
+    if (DevicePath == NULL) {
+        Status = EFI_OUT_OF_RESOURCES;
+        goto Exit;
+    }
+
+    NextDevicePath = DevicePath;
+    Status = EfiOpenFileByDevicePath(&NextDevicePath, &Handle, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(Status)) {
+        goto Exit;
+    }
+
+    VolleySha256Init(&Ctx);
+
+    Buffer = AllocatePool(VOLLEY_HASH_READ_CHUNK_SIZE);
+    if (Buffer == NULL) {
+        Status = EFI_OUT_OF_RESOURCES;
+        goto Exit;
+    }
+
+    do {
+        ReadSize = VOLLEY_HASH_READ_CHUNK_SIZE;
+        Status = FileHandleRead(Handle, &ReadSize, Buffer);
+        if (EFI_ERROR(Status)) {
+            goto Exit;
+        }
+        if (ReadSize == 0) {
+            break;
+        }
+        VolleySha256Update(&Ctx, Buffer, ReadSize);
+    } while (ReadSize > 0);
+
+    VolleySha256Final(&Ctx, Digest);
+
+Exit:
+    if (Buffer != NULL) {
+        FreePool(Buffer);
+    }
+    if (Handle != NULL) {
+        FileHandleClose(Handle);
+    }
+    if (DevicePath != NULL) {
+        FreePool(DevicePath);
+    }
+
+    return Status;
+}
+
+STATIC
+EFI_STATUS
+ValidateSlotChecks(
+    IN  EFI_HANDLE          PartitionHandle,
+    IN  VOLLEY_SLOT_META    *SlotMeta
+)
+{
+    EFI_STATUS  Status;
+    UINTN       Index;
+    UINT8       Digest[VOLLEY_SHA256_DIGEST_SIZE];
+
+    if (SlotMeta == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    if (!SlotMeta->Valid || SlotMeta->CheckCount == 0) {
+        return EFI_SUCCESS;
+    }
+
+    for (Index = 0; Index < SlotMeta->CheckCount; Index++) {
+        if (!SlotMeta->Checks[Index].Valid) {
+            SlotMeta->Valid = FALSE;
+            return EFI_INVALID_PARAMETER;
+        }
+
+        Status = HashFileSha256(PartitionHandle, SlotMeta->Checks[Index].Path, Digest);
+        if (EFI_ERROR(Status)) {
+            ErrorPrint(L"Volley: Hash read failed for %s: %r\r\n",
+                       SlotMeta->Checks[Index].Path, Status);
+            SlotMeta->Valid = FALSE;
+            return Status;
+        }
+
+        if (CompareMem(Digest, SlotMeta->Checks[Index].Sha256, sizeof(Digest)) != 0) {
+            ErrorPrint(L"Volley: Hash mismatch for %s\r\n", SlotMeta->Checks[Index].Path);
+            SlotMeta->Valid = FALSE;
+            return EFI_COMPROMISED_DATA;
+        }
+
+        ErrorPrint(L"Volley: Hash OK for %s\r\n", SlotMeta->Checks[Index].Path);
+    }
+
+    return EFI_SUCCESS;
+}
+
+/**
+  Validate that a partition is bootable for Volley.
+
+  Requires a mountable filesystem and the kernel image present.
+
+  @param[in]  PartitionHandle  Handle to the partition
+  @param[in]  KernelPath       Path to kernel image (device-relative)
+
+  @retval EFI_SUCCESS          Bootable
+  @retval Others               Not bootable
+**/
+STATIC
+EFI_STATUS
+ValidateVolleyBootPartition(
+    IN  EFI_HANDLE      PartitionHandle,
+    IN  CONST CHAR16    *KernelPath
+)
+{
+    EFI_STATUS       Status;
+    EFI_FILE_HANDLE  KernelHandle = NULL;
+    VOID             *Fs = NULL;
+
+    if (KernelPath == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    Status = gBS->HandleProtocol(PartitionHandle, &gEfiSimpleFileSystemProtocolGuid, &Fs);
+    if (EFI_ERROR(Status)) {
+        return Status;
+    }
+
+    Status = OpenAndReadUntrustedFileToBuffer(PartitionHandle, KernelPath, &KernelHandle, NULL, NULL);
+    if (!EFI_ERROR(Status) && KernelHandle != NULL) {
+        FileHandleClose(KernelHandle);
+    }
+
+    return Status;
+}
+
+/**
+  Select the boot slot after validation.
+
+  @param[in]  SlotA         Metadata for slot A
+  @param[in]  SlotB         Metadata for slot B
+  @param[out] SelectedMode  Selected boot mode
+
+  @retval EFI_SUCCESS       Slot selected successfully
+  @retval EFI_NOT_FOUND     Both slots are invalid
+**/
+STATIC
+EFI_STATUS
+SelectBestSlot(
+    IN  CONST VOLLEY_SLOT_META  *SlotA,
+    IN  CONST VOLLEY_SLOT_META  *SlotB,
+    OUT VOLLEY_BOOT_MODE        *SelectedMode
+)
+{
+    if ((SlotA == NULL) || (SlotB == NULL) || (SelectedMode == NULL)) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    if (SlotA->Valid && SlotB->Valid) {
+        if (SlotA->UpdateCounter >= SlotB->UpdateCounter) {
+            DEBUG((DEBUG_INFO, "Volley: Selecting Slot A (counter %u >= %u)\n",
+                   SlotA->UpdateCounter, SlotB->UpdateCounter));
+            *SelectedMode = VOLLEY_MODE_SLOT_A;
+        } else {
+            DEBUG((DEBUG_INFO, "Volley: Selecting Slot B (counter %u > %u)\n",
+                   SlotB->UpdateCounter, SlotA->UpdateCounter));
+            *SelectedMode = VOLLEY_MODE_SLOT_B;
+        }
+        return EFI_SUCCESS;
+    }
+
+    if (SlotA->Valid) {
+        DEBUG((DEBUG_INFO, "Volley: Only Slot A is valid\n"));
+        *SelectedMode = VOLLEY_MODE_SLOT_A;
+        return EFI_SUCCESS;
+    }
+
+    if (SlotB->Valid) {
+        DEBUG((DEBUG_INFO, "Volley: Only Slot B is valid\n"));
+        *SelectedMode = VOLLEY_MODE_SLOT_B;
+        return EFI_SUCCESS;
+    }
+
+    DEBUG((DEBUG_INFO, "Volley: Both slots invalid, will use install mode\n"));
+    return EFI_NOT_FOUND;
+}
+
+/**
+  Main orchestrator - determine Volley boot mode.
+
+  Determines boot mode and which partition to load kernel from.
+
+  Algorithm:
+  1. Read boot_config.txt from the APP installer partition (on NVMe)
+  2. Connect PCI root bridges to enumerate NVMe devices
+  3. Find NVMe device
+  4. Read NVMe GPT DiskGUID
+  5. Compare UUIDs - if mismatch, install mode
+  6. If match, read slot metadata and select best slot
+  7. Verify selected slot's partition GUID matches expected PARTUUID
+
+  @param[in]  EspHandle     Handle to ESP partition (where L4TLauncher lives)
+  @param[in]  InstallerAppHandle Handle to APP installer partition (install-mode kernel, same NVMe)
+  @param[out] BootMode      Determined boot mode
+  @param[out] RootFsHandle  Handle to partition to load kernel from
+
+  @retval EFI_SUCCESS       Boot mode determined successfully
+**/
+STATIC
+EFI_STATUS
+VolleyDetermineBootMode(
+    IN  EFI_HANDLE          EspHandle,
+    IN  EFI_HANDLE          InstallerAppHandle,
+    OUT VOLLEY_BOOT_MODE    *BootMode,
+    OUT EFI_HANDLE          *RootFsHandle
+)
+{
+    EFI_STATUS                  Status;
+    VOLLEY_BOOT_CONFIG          BootConfig;
+    EFI_BLOCK_IO_PROTOCOL       *NvmeBlockIo = NULL;
+    EFI_HANDLE                  NvmeDeviceHandle = NULL;
+    EFI_GUID                    NvmeDiskGuid;
+    EFI_HANDLE                  SlotAHandle = NULL;
+    EFI_HANDLE                  SlotBHandle = NULL;
+    VOLLEY_SLOT_META            SlotAMeta;
+    VOLLEY_SLOT_META            SlotBMeta;
+    EFI_PARTITION_INFO_PROTOCOL *PartInfo = NULL;
+    EFI_GUID                    ExpectedGuid;
+    EFI_HANDLE                  SelectedHandle = NULL;
+
+    if (BootMode == NULL || RootFsHandle == NULL) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    ErrorPrint(L"Volley: Determining boot mode...\r\n");
+
+    // Step 1: Read boot_config.txt from the APP installer partition (on NVMe)
+    Status = ReadVolleyBootConfig(InstallerAppHandle, &BootConfig);
+    if (EFI_ERROR(Status) || !BootConfig.Valid) {
+        ErrorPrint(L"Volley: boot_config.txt missing or invalid\r\n");
+        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_INSTALLER_APP_PARTUUID L")\r\n");
+        *BootMode = VOLLEY_MODE_INSTALL;
+        *RootFsHandle = InstallerAppHandle;
+        return EFI_SUCCESS;
+    }
+
+    // Step 2: Connect PCI root bridges to enumerate NVMe devices
+    ConnectPciRootBridges();
+
+    // Step 3: Find NVMe device
+    Status = FindNvmeDevice(&NvmeBlockIo, &NvmeDeviceHandle);
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: No NVMe device found\r\n");
+        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_INSTALLER_APP_PARTUUID L")\r\n");
+        *BootMode = VOLLEY_MODE_INSTALL;
+        *RootFsHandle = InstallerAppHandle;
+        return EFI_SUCCESS;
+    }
+
+    // Step 4: Read NVMe GPT DiskGUID
+    Status = ReadNvmeDiskGuid(NvmeBlockIo, &NvmeDiskGuid);
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: Failed to read NVMe GPT header\r\n");
+        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_INSTALLER_APP_PARTUUID L")\r\n");
+        *BootMode = VOLLEY_MODE_INSTALL;
+        *RootFsHandle = InstallerAppHandle;
+        return EFI_SUCCESS;
+    }
+
+    // Step 5: Compare UUIDs
+    if (!CompareGuid(&NvmeDiskGuid, &BootConfig.ExpectedNvmeUuid)) {
+        ErrorPrint(L"Volley: NVMe UUID mismatch\r\n");
+        ErrorPrint(L"  Expected: %g\r\n", &BootConfig.ExpectedNvmeUuid);
+        ErrorPrint(L"  Actual:   %g\r\n", &NvmeDiskGuid);
+        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_INSTALLER_APP_PARTUUID L")\r\n");
+        *BootMode = VOLLEY_MODE_INSTALL;
+        *RootFsHandle = InstallerAppHandle;
+        return EFI_SUCCESS;
+    }
+
+    ErrorPrint(L"Volley: NVMe UUID matches (%g)\r\n", &NvmeDiskGuid);
+
+    // Step 6: Find partition handles for slots A and B
+    // Require a mountable filesystem and kernel image before reading slot_meta.txt
+    Status = FindNvmePartitionByName(NvmeDeviceHandle, VOLLEY_SLOT_A_PART_NAME, &SlotAHandle);
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: Slot A (VOLLEY_A) partition not found\r\n");
+        ZeroMem(&SlotAMeta, sizeof(SlotAMeta));
+    } else {
+        Status = ValidateVolleyBootPartition(SlotAHandle, VOLLEY_DIRECT_KERNEL_PATH);
+        if (EFI_ERROR(Status)) {
+            ErrorPrint(L"Volley: Slot A not bootable (missing filesystem or kernel)\r\n");
+            ZeroMem(&SlotAMeta, sizeof(SlotAMeta));
+        } else {
+            ReadSlotMetadata(SlotAHandle, &SlotAMeta);
+            ValidateSlotChecks(SlotAHandle, &SlotAMeta);
+            ErrorPrint(L"Volley: Slot A: valid=%d update_counter=%u\r\n",
+                       SlotAMeta.Valid, SlotAMeta.UpdateCounter);
+        }
+    }
+
+    Status = FindNvmePartitionByName(NvmeDeviceHandle, VOLLEY_SLOT_B_PART_NAME, &SlotBHandle);
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: Slot B (VOLLEY_B) partition not found\r\n");
+        ZeroMem(&SlotBMeta, sizeof(SlotBMeta));
+    } else {
+        Status = ValidateVolleyBootPartition(SlotBHandle, VOLLEY_DIRECT_KERNEL_PATH);
+        if (EFI_ERROR(Status)) {
+            ErrorPrint(L"Volley: Slot B not bootable (missing filesystem or kernel)\r\n");
+            ZeroMem(&SlotBMeta, sizeof(SlotBMeta));
+        } else {
+            ReadSlotMetadata(SlotBHandle, &SlotBMeta);
+            ValidateSlotChecks(SlotBHandle, &SlotBMeta);
+            ErrorPrint(L"Volley: Slot B: valid=%d update_counter=%u\r\n",
+                       SlotBMeta.Valid, SlotBMeta.UpdateCounter);
+        }
+    }
+
+    // Step 7: Select best slot
+    Status = SelectBestSlot(&SlotAMeta, &SlotBMeta, BootMode);
+    if (EFI_ERROR(Status)) {
+        ErrorPrint(L"Volley: Both slots invalid\r\n");
+        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_INSTALLER_APP_PARTUUID L")\r\n");
+        *BootMode = VOLLEY_MODE_INSTALL;
+        *RootFsHandle = InstallerAppHandle;
+        return EFI_SUCCESS;
+    }
+
+    // Step 8: Verify partition GUID matches expected PARTUUID
+    if (*BootMode == VOLLEY_MODE_SLOT_A) {
+        SelectedHandle = SlotAHandle;
+        StrToGuid(VOLLEY_NVME_SLOT_A_PARTUUID, &ExpectedGuid);
+    } else {
+        SelectedHandle = SlotBHandle;
+        StrToGuid(VOLLEY_NVME_SLOT_B_PARTUUID, &ExpectedGuid);
+    }
+
+    // Get actual partition GUID from GPT entry
+    Status = gBS->HandleProtocol(SelectedHandle, &gEfiPartitionInfoProtocolGuid, (VOID**)&PartInfo);
+    if (!EFI_ERROR(Status) && PartInfo->Type == PARTITION_TYPE_GPT) {
+        if (!CompareGuid(&PartInfo->Info.Gpt.UniquePartitionGUID, &ExpectedGuid)) {
+            ErrorPrint(L"Volley: PARTUUID mismatch!\r\n");
+            ErrorPrint(L"  Expected: %g\r\n", &ExpectedGuid);
+            ErrorPrint(L"  Actual:   %g\r\n", &PartInfo->Info.Gpt.UniquePartitionGUID);
+            ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_INSTALLER_APP_PARTUUID L")\r\n");
+            *BootMode = VOLLEY_MODE_INSTALL;
+            *RootFsHandle = InstallerAppHandle;
+            return EFI_SUCCESS;
+        }
+    }
+
+    // PARTUUID verified - set RootFsHandle to selected slot
+    *RootFsHandle = SelectedHandle;
+
+    // Log selected slot
+    if (*BootMode == VOLLEY_MODE_SLOT_A) {
+        ErrorPrint(L"Volley: Selected Slot A (PARTUUID=" VOLLEY_NVME_SLOT_A_PARTUUID L")\r\n");
+    } else {
+        ErrorPrint(L"Volley: Selected Slot B (PARTUUID=" VOLLEY_NVME_SLOT_B_PARTUUID L")\r\n");
+    }
+
+    return EFI_SUCCESS;
+}
+
+//
+// ============================================================================
+// End of Volley Boot Mode Detection Functions
+// ============================================================================
+//
+#endif  // NVMe slot selection enabled
+
+STATIC
+EFI_STATUS
+BuildVolleyBootConfigForMode(
+    IN  VOLLEY_BOOT_MODE        Mode,
+    OUT EXTLINUX_BOOT_CONFIG    *BootConfig
+)
+{
+    EFI_STATUS Status;
+    EXTLINUX_BOOT_OPTION* Option;
+
+    if (BootConfig == NULL)
+    {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    BootConfig->DefaultBootEntry = 0;
+    BootConfig->NumberOfBootOptions = 1;
+    BootConfig->Timeout = 0;
+
+    Option = &BootConfig->BootOptions[0];
+
+    Status = AllocateBootOptionString(&Option->Label, L"volley-default");
+    if (EFI_ERROR(Status))
+    {
+        goto Error;
+    }
+
+    Status = AllocateBootOptionString(&Option->MenuLabel, L"Volley Direct Boot");
+    if (EFI_ERROR(Status))
+    {
+        goto Error;
+    }
+
+    Status = AllocateBootOptionString(&Option->LinuxPath, VOLLEY_DIRECT_KERNEL_PATH);
+    if (EFI_ERROR(Status))
+    {
+        goto Error;
+    }
+
+    Option->DtbPath = GetVolleyDtbPath();
+    if (Option->DtbPath == NULL)
+    {
+        Status = AllocateBootOptionString(&Option->DtbPath, VOLLEY_DTB_ORNX_PATH);
+    }
+    if (EFI_ERROR(Status))
+    {
+        goto Error;
+    }
+
+    Status = AllocateBootOptionString(&Option->InitrdPath, VOLLEY_DIRECT_INITRD_PATH);
+    if (EFI_ERROR(Status))
+    {
+        goto Error;
+    }
+
+    // Set boot args based on mode - this is the key cmdline for Linux init
+    // VOLLEY_BASE_CMDLINE provides earlycon/console/noinitrd (Jetson 5.10 has no CMDLINE_EXTEND)
+    ErrorPrint(L"Volley: BuildVolleyBootConfigForMode: mode=%d\r\n", Mode);
+    ErrorPrint(L"Volley: USB autosuspend disabled (usbcore.autosuspend=-1)\r\n");
+    switch (Mode) {
+        case VOLLEY_MODE_INSTALL:
+            ErrorPrint(L"Volley: Setting boot args for INSTALL mode\r\n");
+            Status = AllocateBootOptionString(&Option->BootArgs,
+                VOLLEY_BASE_CMDLINE L"root=PARTUUID=" VOLLEY_INSTALLER_APP_PARTUUID L" volley.mode=install");
+            break;
+        case VOLLEY_MODE_SLOT_A:
+            ErrorPrint(L"Volley: Setting boot args for SLOT_A mode\r\n");
+            Status = AllocateBootOptionString(&Option->BootArgs,
+                VOLLEY_BASE_CMDLINE L"root=PARTUUID=" VOLLEY_NVME_SLOT_A_PARTUUID);
+            break;
+        case VOLLEY_MODE_SLOT_B:
+            ErrorPrint(L"Volley: Setting boot args for SLOT_B mode\r\n");
+            Status = AllocateBootOptionString(&Option->BootArgs,
+                VOLLEY_BASE_CMDLINE L"root=PARTUUID=" VOLLEY_NVME_SLOT_B_PARTUUID);
+            break;
+        default:
+            ErrorPrint(L"Volley: Unknown mode %d, defaulting to INSTALL\r\n", Mode);
+            Status = AllocateBootOptionString(&Option->BootArgs,
+                VOLLEY_BASE_CMDLINE L"root=PARTUUID=" VOLLEY_INSTALLER_APP_PARTUUID L" volley.mode=install");
+            break;
+    }
+    if (EFI_ERROR(Status))
+    {
+        goto Error;
+    }
+
+    ErrorPrint(L"Volley: Boot config built:\r\n");
+    ErrorPrint(L"  Kernel: %s\r\n", Option->LinuxPath);
+    ErrorPrint(L"  DTB:    %s\r\n", Option->DtbPath);
+    ErrorPrint(L"  Args:   %s\r\n", Option->BootArgs);
+
+    return EFI_SUCCESS;
+
+Error:
+    if (Option->Label != NULL)
+    {
+        FreePool(Option->Label);
+        Option->Label = NULL;
+    }
+
+    if (Option->MenuLabel != NULL)
+    {
+        FreePool(Option->MenuLabel);
+        Option->MenuLabel = NULL;
+    }
+
+    if (Option->LinuxPath != NULL)
+    {
+        FreePool(Option->LinuxPath);
+        Option->LinuxPath = NULL;
+    }
+
+    if (Option->DtbPath != NULL)
+    {
+        FreePool(Option->DtbPath);
+        Option->DtbPath = NULL;
+    }
+
+    if (Option->InitrdPath != NULL)
+    {
+        FreePool(Option->InitrdPath);
+        Option->InitrdPath = NULL;
+    }
+
+    if (Option->BootArgs != NULL)
+    {
+        FreePool(Option->BootArgs);
+        Option->BootArgs = NULL;
+    }
+
+    BootConfig->NumberOfBootOptions = 0;
+    BootConfig->DefaultBootEntry = 0;
+
+    return Status;
+}
 /**
   Process the extlinux.conf file
 
@@ -1476,16 +2983,10 @@ ProcessExtLinuxConfig (
   OUT EFI_HANDLE            *RootFsHandle
   )
 {
-  EFI_STATUS       Status;
-  EFI_FILE_HANDLE  FileHandle;
-  CHAR16           *FileLine = NULL;
-  CHAR16           *CleanLine;
-  CHAR16           *DefaultLabel = NULL;
-  CHAR16           *Timeout      = NULL;
-  CHAR16           *CbootArg     = NULL;
-  CHAR16           *PostCbootArg = NULL;
-  BOOLEAN          Ascii;
-  UINTN            Index;
+  EFI_STATUS        Status;
+  UINTN             Index;
+  VOLLEY_BOOT_MODE  BootMode;
+  EFI_HANDLE        InstallerAppHandle = NULL;
 
   ZeroMem (BootConfig, sizeof (EXTLINUX_BOOT_CONFIG));
 
@@ -1493,123 +2994,36 @@ ProcessExtLinuxConfig (
     return EFI_INVALID_PARAMETER;
   }
 
-  Status = FindPartitionInfo (DeviceHandle, ROOTFS_BASE_NAME, BootChain, NULL, RootFsHandle);
+  // DeviceHandle is the ESP partition (where L4TLauncher.efi lives). On ornx
+  // the ESP, the APP installer partition, and the VOLLEY_A/B slots all live
+  // on the single NVMe disk.
+  ErrorPrint (L"Volley: ProcessExtLinuxConfig starting\r\n");
+  PrintPartitionUuid (DeviceHandle);
+
+  // Find the APP installer partition (sibling of the ESP on the same disk) -
+  // install-mode kernel lives at /boot/Image there.
+  Status = FindPartitionInfo (DeviceHandle, VOLLEY_INSTALLER_PART_NAME, 0, NULL, &InstallerAppHandle);
+  if (EFI_ERROR (Status) || (InstallerAppHandle == NULL)) {
+    ErrorPrint (L"Volley: FAILED to find APP installer partition: %r\r\n", Status);
+    return EFI_NOT_FOUND;
+  }
+
+  ErrorPrint (L"Volley: Found APP installer partition\r\n");
+  PrintPartitionUuid (InstallerAppHandle);
+
+  Status = VolleyDetermineBootMode (DeviceHandle, InstallerAppHandle, &BootMode, RootFsHandle);
   if (EFI_ERROR (Status)) {
-    ErrorPrint (L"%a: Unable to find partition info\r\n", __FUNCTION__);
-    return Status;
+    ErrorPrint (L"Volley: Boot mode detection failed: %r - falling back to install mode\r\n", Status);
+    BootMode      = VOLLEY_MODE_INSTALL;
+    *RootFsHandle = InstallerAppHandle;
   }
 
-  Status = OpenAndReadFileToBuffer (
-             *RootFsHandle,
-             EXTLINUX_CONF_PATH,
-             &FileHandle,
-             NULL,
-             NULL
-             );
+  ErrorPrint (L"Volley: Boot mode = %d (0=INSTALL, 1=SLOT_A, 2=SLOT_B)\r\n", BootMode);
+  PrintPartitionUuid (*RootFsHandle);
+
+  Status = BuildVolleyBootConfigForMode (BootMode, BootConfig);
   if (EFI_ERROR (Status)) {
-    ErrorPrint (L"%a:sds Failed to Authenticate %s (%r)\r\n", __FUNCTION__, EXTLINUX_CONF_PATH, Status);
     return Status;
-  }
-
-  while (!FileHandleEof (FileHandle)) {
-    if (FileLine != NULL) {
-      FreePool (FileLine);
-      FileLine = NULL;
-    }
-
-    FileLine = FileHandleReturnLine (FileHandle, &Ascii);
-    if (FileLine == NULL) {
-      break;
-    }
-
-    CleanLine = CleanExtLinuxLine (FileLine);
-    if (*CleanLine != CHAR_NULL) {
-      Status = CheckCommandString (CleanLine, EXTLINUX_KEY_TIMEOUT, &Timeout);
-      if (!EFI_ERROR (Status)) {
-        BootConfig->Timeout = StrDecimalToUintn (Timeout);
-        FreePool (Timeout);
-        Timeout = NULL;
-        continue;
-      }
-
-      Status = CheckCommandString (CleanLine, EXTLINUX_KEY_DEFAULT, &DefaultLabel);
-      if (!EFI_ERROR (Status)) {
-        continue;
-      }
-
-      Status = CheckCommandString (CleanLine, EXTLINUX_KEY_MENU_TITLE, &BootConfig->MenuTitle);
-      if (!EFI_ERROR (Status)) {
-        continue;
-      }
-
-      if (BootConfig->NumberOfBootOptions < MAX_EXTLINUX_OPTIONS) {
-        Status = CheckCommandString (CleanLine, EXTLINUX_KEY_LABEL, &BootConfig->BootOptions[BootConfig->NumberOfBootOptions].Label);
-        if (!EFI_ERROR (Status)) {
-          BootConfig->NumberOfBootOptions++;
-          continue;
-        }
-      }
-
-      if ((BootConfig->NumberOfBootOptions <= MAX_EXTLINUX_OPTIONS) &&
-          (BootConfig->NumberOfBootOptions != 0))
-      {
-        Status = CheckCommandString (CleanLine, EXTLINUX_KEY_MENU_LABEL, &BootConfig->BootOptions[BootConfig->NumberOfBootOptions-1].MenuLabel);
-        if (!EFI_ERROR (Status)) {
-          continue;
-        }
-
-        Status = CheckCommandString (CleanLine, EXTLINUX_KEY_LINUX, &BootConfig->BootOptions[BootConfig->NumberOfBootOptions-1].LinuxPath);
-        if (!EFI_ERROR (Status)) {
-          continue;
-        }
-
-        Status = CheckCommandString (CleanLine, EXTLINUX_KEY_INITRD, &BootConfig->BootOptions[BootConfig->NumberOfBootOptions-1].InitrdPath);
-        if (!EFI_ERROR (Status)) {
-          continue;
-        }
-
-        Status = CheckCommandString (CleanLine, EXTLINUX_KEY_FDT, &BootConfig->BootOptions[BootConfig->NumberOfBootOptions-1].DtbPath);
-        if (!EFI_ERROR (Status)) {
-          continue;
-        }
-
-        Status = CheckCommandString (CleanLine, EXTLINUX_KEY_OVERLAYS, &BootConfig->BootOptions[BootConfig->NumberOfBootOptions-1].Overlays);
-        if (!EFI_ERROR (Status)) {
-          continue;
-        }
-
-        Status = CheckCommandString (CleanLine, EXTLINUX_KEY_APPEND, &BootConfig->BootOptions[BootConfig->NumberOfBootOptions-1].BootArgs);
-        if (!EFI_ERROR (Status)) {
-          CbootArg = StrStr (BootConfig->BootOptions[BootConfig->NumberOfBootOptions-1].BootArgs, EXTLINUX_CBOOT_ARG);
-          if (CbootArg != NULL) {
-            PostCbootArg = CbootArg + StrLen (EXTLINUX_CBOOT_ARG);
-            while (*PostCbootArg == L' ') {
-              PostCbootArg++;
-            }
-
-            CopyMem (CbootArg, PostCbootArg, StrSize (PostCbootArg));
-          }
-
-          continue;
-        }
-      }
-    }
-  }
-
-  if (FileLine != NULL) {
-    FreePool (FileLine);
-    FileLine = NULL;
-  }
-
-  FileHandleClose (FileHandle);
-
-  if (DefaultLabel != NULL) {
-    for (Index = 0; Index < BootConfig->NumberOfBootOptions; Index++) {
-      if (StrCmp (DefaultLabel, BootConfig->BootOptions[Index].Label) == 0) {
-        BootConfig->DefaultBootEntry = Index;
-        break;
-      }
-    }
   }
 
   for (Index = 0; Index < BootConfig->NumberOfBootOptions; Index++) {
@@ -1624,17 +3038,9 @@ ProcessExtLinuxConfig (
     if (BootConfig->BootOptions[Index].LinuxPath != NULL) {
       PathCleanUpDirectories (BootConfig->BootOptions[Index].LinuxPath);
     }
-
-    if (BootConfig->BootOptions[Index].Overlays != NULL) {
-      PathCleanUpDirectories (BootConfig->BootOptions[Index].Overlays);
-    }
   }
 
-  if (BootConfig->NumberOfBootOptions == 0) {
-    return EFI_NOT_FOUND;
-  } else {
-    return EFI_SUCCESS;
-  }
+  return EFI_SUCCESS;
 }
 
 /**
