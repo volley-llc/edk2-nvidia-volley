@@ -327,6 +327,176 @@ LocatePartitionIndex (
 }
 
 /**
+  Print the partition UUID for a device handle (for diagnostics)
+
+  @param[in]  DeviceHandle     The handle of partition.
+
+**/
+STATIC
+VOID
+EFIAPI
+PrintPartitionUuid(IN EFI_HANDLE DeviceHandle)
+{
+    EFI_DEVICE_PATH_PROTOCOL* DevicePath;
+    HARDDRIVE_DEVICE_PATH* HardDrivePath;
+    EFI_GUID* PartGuid;
+
+    if (DeviceHandle == 0)
+    {
+        ErrorPrint(L"  Partition: (null handle)\r\n");
+        return;
+    }
+
+    DevicePath = DevicePathFromHandle(DeviceHandle);
+    if (DevicePath == NULL)
+    {
+        ErrorPrint(L"  Partition: (no device path)\r\n");
+        return;
+    }
+
+    while (!IsDevicePathEndType(DevicePath))
+    {
+        if ((DevicePathType(DevicePath) == MEDIA_DEVICE_PATH) &&
+            (DevicePathSubType(DevicePath) == MEDIA_HARDDRIVE_DP))
+        {
+            HardDrivePath = (HARDDRIVE_DEVICE_PATH*)DevicePath;
+            PartGuid = (EFI_GUID*)&HardDrivePath->Signature;
+            ErrorPrint(L"  Partition %d UUID: %g\r\n",
+                       HardDrivePath->PartitionNumber, PartGuid);
+            return;
+        }
+
+        DevicePath = NextDevicePathNode(DevicePath);
+    }
+
+    ErrorPrint(L"  Partition: (not a harddrive partition)\r\n");
+}
+
+STATIC
+VOID
+EFIAPI
+LogFdtStringListProperty(
+    IN VOID*        Fdt,
+    IN INT32        NodeOffset,
+    IN CONST CHAR8* PropertyName,
+    IN CONST CHAR16* Label
+)
+{
+    CONST CHAR8* Value;
+    INT32 Length;
+    INT32 Offset;
+    UINT32 Index;
+
+    Value = fdt_getprop(Fdt, NodeOffset, PropertyName, &Length);
+    if (Value == NULL || Length <= 0)
+    {
+        return;
+    }
+
+    Offset = 0;
+    Index = 0;
+    while (Offset < Length)
+    {
+        INT32 ItemLength = 0;
+
+        while ((Offset + ItemLength < Length) && (Value[Offset + ItemLength] != '\0'))
+        {
+            ItemLength++;
+        }
+
+        if (ItemLength > 0)
+        {
+            ErrorPrint(L"  %s[%u]: %a\r\n", Label, Index, &Value[Offset]);
+            Index++;
+        }
+
+        Offset += ItemLength + 1;
+    }
+}
+
+STATIC
+VOID
+EFIAPI
+LogFdtU32ArrayProperty(
+    IN VOID*        Fdt,
+    IN INT32        NodeOffset,
+    IN CONST CHAR8* PropertyName,
+    IN CONST CHAR16* Label
+)
+{
+    CONST UINT32* Data;
+    INT32 Length;
+    UINTN Count;
+    UINTN Index;
+
+    Data = fdt_getprop(Fdt, NodeOffset, PropertyName, &Length);
+    if (Data == NULL || Length <= 0 || (Length % sizeof(UINT32)) != 0)
+    {
+        return;
+    }
+
+    Count = (UINTN)Length / sizeof(UINT32);
+    ErrorPrint(L"  %s:", Label);
+    for (Index = 0; Index < Count && Index < 8; Index++)
+    {
+        ErrorPrint(L" %x", fdt32_to_cpu(Data[Index]));
+    }
+    if (Count > 8)
+    {
+        ErrorPrint(L" ...");
+    }
+    ErrorPrint(L"\r\n");
+}
+
+STATIC
+VOID
+EFIAPI
+LogLoadedFdtDiagnostics(IN VOID* Fdt, IN UINTN FdtSize)
+{
+    INT32 NodeOffset;
+    INT32 PhyOffset;
+
+    if (Fdt == NULL)
+    {
+        return;
+    }
+
+    ErrorPrint(L"Volley: Loaded DTB diagnostics:\r\n");
+    ErrorPrint(L"  loaded-size: %lu\r\n", FdtSize);
+    ErrorPrint(L"  totalsize:    %u\r\n", (UINT32)fdt_totalsize(Fdt));
+    LogFdtStringListProperty(Fdt, 0, "model", L"model");
+    LogFdtStringListProperty(Fdt, 0, "compatible", L"compatible");
+    LogFdtStringListProperty(Fdt, 0, "nvidia,dtsfilename", L"dtsfilename");
+
+    NodeOffset = fdt_path_offset(Fdt, "/ethernet@2490000");
+    if (NodeOffset < 0)
+    {
+        ErrorPrint(L"  ethernet@2490000: missing (%a)\r\n", fdt_strerror(NodeOffset));
+        return;
+    }
+
+    ErrorPrint(L"  ethernet@2490000: present\r\n");
+    LogFdtStringListProperty(Fdt, NodeOffset, "status", L"eth.status");
+    LogFdtStringListProperty(Fdt, NodeOffset, "compatible", L"eth.compatible");
+    LogFdtStringListProperty(Fdt, NodeOffset, "phy-mode", L"eth.phy-mode");
+    LogFdtU32ArrayProperty(Fdt, NodeOffset, "nvidia,phy-reset-gpio", L"eth.nvidia,phy-reset-gpio");
+    LogFdtU32ArrayProperty(Fdt, NodeOffset, "phy-handle", L"eth.phy-handle");
+
+    PhyOffset = fdt_path_offset(Fdt, "/ethernet@2490000/mdio/phy@0");
+    if (PhyOffset < 0)
+    {
+        ErrorPrint(L"  ethernet@2490000/mdio/phy@0: missing (%a)\r\n", fdt_strerror(PhyOffset));
+        return;
+    }
+
+    ErrorPrint(L"  ethernet@2490000/mdio/phy@0: present\r\n");
+    LogFdtStringListProperty(Fdt, PhyOffset, "status", L"phy.status");
+    LogFdtStringListProperty(Fdt, PhyOffset, "compatible", L"phy.compatible");
+    LogFdtU32ArrayProperty(Fdt, PhyOffset, "reg", L"phy.reg");
+    LogFdtU32ArrayProperty(Fdt, PhyOffset, "interrupts", L"phy.interrupts");
+}
+
+/**
   Find the partition on the same disk as the loaded image
 
   Will fall back to the other bootchain if needed
@@ -1530,6 +1700,18 @@ ExtLinuxBoot (
   UINTN                                 Index;
   CHAR8                                 SWModule[] = "kernel";
   INTN                                  FdtStatus;
+  EFI_LOADED_IMAGE_PROTOCOL             *EspLoadedImage = NULL;
+  EFI_HANDLE                            EspDeviceHandle = NULL;
+
+  // Volley: get the ESP device handle (where L4TLauncher.efi was loaded from)
+  // so DTBs can be loaded from EFI\volley\dtb on the ESP.
+  Status = gBS->HandleProtocol (ImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&EspLoadedImage);
+  if (!EFI_ERROR (Status) && (EspLoadedImage != NULL)) {
+    EspDeviceHandle = EspLoadedImage->DeviceHandle;
+  } else {
+    ErrorPrint (L"%a: Failed to get ESP device handle, will use rootfs device\r\n", __FUNCTION__);
+    EspDeviceHandle = DeviceHandle;
+  }
 
   // Process Args if present
   if (BootOption->BootArgs != NULL) {
@@ -1579,31 +1761,51 @@ ExtLinuxBoot (
     }
   }
 
-  // Reload fdt if needed
+  // Reload fdt if needed.
+  // Volley: always prefer the explicit DTB from the ESP over ACPI or the
+  // existing configuration table — DTB identity must be deterministic.
   Status = EfiGetSystemConfigurationTable (&gEfiAcpiTableGuid, &AcpiBase);
-  if (EFI_ERROR (Status) && (BootOption->DtbPath != NULL)) {
+  if (BootOption->DtbPath != NULL) {
     Status = EfiGetSystemConfigurationTable (&gFdtTableGuid, &OldFdtBase);
     if (EFI_ERROR (Status)) {
       OldFdtBase = NULL;
     }
 
+    // Try the ESP device first (where BOOTAA64.efi lives)
+    ErrorPrint (L"%a: Attempting to load DTB from ESP: %s\r\n", __FUNCTION__, BootOption->DtbPath);
     Status = OpenAndReadFileToBuffer (
-               DeviceHandle,
+               EspDeviceHandle,
                BootOption->DtbPath,
                NULL,
                &NewFdtBase,
                &FdtSize
                );
     if (EFI_ERROR (Status)) {
-      ErrorPrint (L"%a: Failed to authenticate %s (%r)\r\n", __FUNCTION__, EXTLINUX_CONF_PATH, Status);
-      goto LoadKernel;
+      ErrorPrint (L"%a: ESP load failed (%r), trying rootfs device\r\n", __FUNCTION__, Status);
+      Status = OpenAndReadFileToBuffer (
+                 DeviceHandle,
+                 BootOption->DtbPath,
+                 NULL,
+                 &NewFdtBase,
+                 &FdtSize
+                 );
     }
+
+    if (EFI_ERROR (Status)) {
+      // Volley: booting without the intended DTB is worse than not booting
+      ErrorPrint (L"%a: FATAL: failed to load DTB %s (%r)\r\n", __FUNCTION__, BootOption->DtbPath, Status);
+      goto Exit;
+    }
+
+    ErrorPrint (L"%a: Successfully loaded DTB (%lu bytes)\r\n", __FUNCTION__, FdtSize);
 
     ExpandedFdtBase = AllocatePages (EFI_SIZE_TO_PAGES (4 * FdtTotalSize (NewFdtBase)));
     if (FdtOpenInto (NewFdtBase, ExpandedFdtBase, 4 * FdtTotalSize (NewFdtBase)) != 0) {
       Status = EFI_NOT_FOUND;
       goto Exit;
     }
+
+    LogLoadedFdtDiagnostics (ExpandedFdtBase, FdtSize);
 
     Status = gBS->InstallConfigurationTable (&gFdtTableGuid, ExpandedFdtBase);
     if (EFI_ERROR (Status)) {
@@ -1667,9 +1869,10 @@ ExtLinuxBoot (
     }
   }
 
-LoadKernel:
   // Load and start the kernel
   if (BootOption->LinuxPath != NULL) {
+    ErrorPrint (L"%a: Loading kernel from path: %s\r\n", __FUNCTION__, BootOption->LinuxPath);
+    PrintPartitionUuid (DeviceHandle);
     if (EncryptionInfo.ImageEncrypted) {
       Status = OpenAndDecryptFileToBuffer (
                  DeviceHandle,
