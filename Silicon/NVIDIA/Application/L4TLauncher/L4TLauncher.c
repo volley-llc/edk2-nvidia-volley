@@ -43,6 +43,31 @@
 #include <Library/FdtLib.h>
 #include "L4TLauncher.h"
 #include "L4TRootfsValidation.h"
+
+//
+// Volley direct-boot fixed inputs (ornx: Orin NX 16GB on DSBOARD-ORNX).
+// The build system substitutes ${VOLLEY_BUILD_INFO}/${VOLLEY_SYSTEM_NAME}
+// literals below at build time (see loki firmware/build.sh).
+//
+#ifndef VOLLEY_DIRECT_KERNEL_PATH
+// Kernel lives at /boot/Image on the selected slot / installer partition
+#define VOLLEY_DIRECT_KERNEL_PATH  L"boot\\Image"
+#endif
+
+#define VOLLEY_DTB_OVERRIDE_VAR  L"VolleyDtbPath"
+#define VOLLEY_DTB_PROFILE_VAR   L"VolleyDtbProfile"
+// Single-SKU: no industrial/commercial EEPROM split on Orin NX
+#define VOLLEY_DTB_ORNX_PATH     L"EFI\\volley\\dtb\\tegra234-p3768-0000-p3767-0000.dtb"
+#define VOLLEY_SYSTEM_NAME       L"${VOLLEY_SYSTEM_NAME}"
+
+#ifndef VOLLEY_DIRECT_INITRD_PATH
+#define VOLLEY_DIRECT_INITRD_PATH  NULL
+#endif
+
+#ifndef VOLLEY_DIRECT_BOOTARGS
+// usbcore.autosuspend=-1 prevents ZED camera disconnects
+#define VOLLEY_DIRECT_BOOTARGS  L"usbcore.autosuspend=-1"
+#endif
 #include "L4TPreIsoInstaller.h"
 
 L4T_LAUNCHER_SUPPORT_PROTOCOL  *gL4TSupportProtocol;
@@ -1457,60 +1482,9 @@ ExtLinuxBootMenu (
   IN EXTLINUX_BOOT_CONFIG  *BootConfig
   )
 {
-  EFI_STATUS     Status;
-  UINTN          Index;
-  EFI_EVENT      EventArray[2];
-  UINTN          EventIndex;
-  EFI_INPUT_KEY  Key;
-
-  // Display boot options
-  if ((BootConfig->Timeout == 0) ||
-      (BootConfig->NumberOfBootOptions == 1))
-  {
-    return BootConfig->DefaultBootEntry;
-  }
-
-  Status = gBS->CreateEvent (EVT_TIMER, TPL_CALLBACK, NULL, NULL, &EventArray[0]);
-  if (EFI_ERROR (Status)) {
-    ErrorPrint (L"Failed to create timer event booting default\r\n");
-    return BootConfig->DefaultBootEntry;
-  }
-
-  if (BootConfig->MenuTitle != NULL) {
-    Print (L"%s\r\n", BootConfig->MenuTitle);
-  } else {
-    Print (L"L4T boot options\r\n");
-  }
-
-  for (Index = 0; Index < BootConfig->NumberOfBootOptions; Index++) {
-    Print (L"%d: %s\r\n", Index, BootConfig->BootOptions[Index].MenuLabel);
-  }
-
-  Status = gBS->SetTimer (EventArray[0], TimerRelative, EFI_TIMER_PERIOD_SECONDS (BootConfig->Timeout)/10);
-  if (EFI_ERROR (Status)) {
-    ErrorPrint (L"Failed to set timer, booting default\r\n");
-    return BootConfig->DefaultBootEntry;
-  }
-
-  EventArray[1] = gST->ConIn->WaitForKey;
-  Print (L"Press 0-%d to boot selection within %d.%d seconds.\r\n", BootConfig->NumberOfBootOptions - 1, BootConfig->Timeout/10, BootConfig->Timeout %10);
-  Print (L"Press any other key to boot default (Option: %d)\r\n", BootConfig->DefaultBootEntry);
-
-  gBS->WaitForEvent (2, EventArray, &EventIndex);
-  gBS->CloseEvent (EventArray[0]);
-  if (EventIndex == 1) {
-    Status = gST->ConIn->ReadKeyStroke (gST->ConIn, &Key);
-    if (!EFI_ERROR (Status) &&
-        (Key.ScanCode == SCAN_NULL))
-    {
-      if ((Key.UnicodeChar >= L'0') &&
-          (Key.UnicodeChar <= L'0' + BootConfig->NumberOfBootOptions - 1))
-      {
-        return Key.UnicodeChar - L'0';
-      }
-    }
-  }
-
+  //
+  // Volley builds suppress all keyboard input, so present no delay/hotkey UI.
+  //
   return BootConfig->DefaultBootEntry;
 }
 
@@ -1844,86 +1818,27 @@ ProcessBootParams (
   OUT L4T_BOOT_PARAMS            *BootParams
   )
 {
-  CONST CHAR16  *CurrentBootOption;
-  EFI_STATUS    Status;
-  UINT32        BootChain;
-  UINTN         DataSize;
-  UINT64        StringValue;
+  EFI_STATUS  Status;
 
   if ((LoadedImage == NULL) || (BootParams == NULL)) {
     return EFI_INVALID_PARAMETER;
   }
 
+  //
+  // Volley: deterministic direct boot. No NVRAM-driven boot mode/chain, no
+  // LoadOptions overrides — always the Direct (ExtLinux) path on chain A.
+  //
+  ZeroMem (BootParams, sizeof (*BootParams));
+  BootParams->BootMode  = NVIDIA_L4T_BOOTMODE_DIRECT;
   BootParams->BootChain = 0;
 
-  DataSize = sizeof (BootParams->BootMode);
-  Status   = gRT->GetVariable (L4T_BOOTMODE_VARIABLE_NAME, &gNVIDIAPublicVariableGuid, NULL, &DataSize, &BootParams->BootMode);
-  if (EFI_ERROR (Status) || (BootParams->BootMode > NVIDIA_L4T_BOOTMODE_RECOVERY)) {
-    BootParams->BootMode = NVIDIA_L4T_BOOTMODE_GRUB;
-  }
-
-  DataSize = sizeof (BootChain);
-  Status   = gRT->GetVariable (BOOT_FW_VARIABLE_NAME, &gNVIDIAPublicVariableGuid, NULL, &DataSize, &BootChain);
-  // If variable does not exist, is >4 bytes or has a value larger than 1, boot partition A
-  if (!EFI_ERROR (Status) && (BootChain <= 1)) {
-    BootParams->BootChain = BootChain;
-  }
-
-  // Read current OS boot type to allow for chaining
-  DataSize = sizeof (BootChain);
-  Status   = gRT->GetVariable (BOOT_OS_VARIABLE_NAME, &gNVIDIAPublicVariableGuid, NULL, &DataSize, &BootChain);
-  // If variable does not exist, is >4 bytes or has a value larger than 1, boot partition A
-  if (!EFI_ERROR (Status) && (BootChain <= 1)) {
-    BootParams->BootChain = BootChain;
-  }
-
-  if (LoadedImage->LoadOptionsSize) {
-    CurrentBootOption = StrStr (LoadedImage->LoadOptions, BOOTMODE_DIRECT_STRING);
-    if (CurrentBootOption != NULL) {
-      BootParams->BootMode = NVIDIA_L4T_BOOTMODE_DIRECT;
-    }
-
-    CurrentBootOption = StrStr (LoadedImage->LoadOptions, BOOTMODE_GRUB_STRING);
-    if (CurrentBootOption != NULL) {
-      BootParams->BootMode = NVIDIA_L4T_BOOTMODE_GRUB;
-    }
-
-    CurrentBootOption = StrStr (LoadedImage->LoadOptions, BOOTMODE_BOOTIMG_STRING);
-    if (CurrentBootOption != NULL) {
-      BootParams->BootMode = NVIDIA_L4T_BOOTMODE_BOOTIMG;
-    }
-
-    CurrentBootOption = StrStr (LoadedImage->LoadOptions, BOOTMODE_RECOVERY_STRING);
-    if (CurrentBootOption != NULL) {
-      BootParams->BootMode = NVIDIA_L4T_BOOTMODE_RECOVERY;
-    }
-
-    // See if boot option is passed in
-    CurrentBootOption = StrStr (LoadedImage->LoadOptions, BOOTCHAIN_OVERRIDE_STRING);
-    if (CurrentBootOption != NULL) {
-      CurrentBootOption += StrLen (BOOTCHAIN_OVERRIDE_STRING);
-      Status             = StrDecimalToUint64S (CurrentBootOption, NULL, &StringValue);
-      if (EFI_ERROR (Status)) {
-        ErrorPrint (L"Failed to read boot chain override: %r\r\n", Status);
-      } else if (StringValue <= 1) {
-        BootParams->BootChain = (UINT32)StringValue;
-      } else {
-        ErrorPrint (L"Boot chain override value out of range, ignoring\r\n");
-      }
-    }
-  }
-
-  // Find valid Rootfs Chain. If not, select recovery kernel
+  // Volley-simplified validator: sanity-clamps the chain for direct boot
   Status = ValidateRootfsStatus (BootParams);
   if (EFI_ERROR (Status)) {
     ErrorPrint (L"Failed to validate rootfs status: %r\r\n", Status);
   }
 
-  // Store the current boot chain in volatile variable to allow chain loading
-  Status = gRT->SetVariable (BOOT_OS_VARIABLE_NAME, &gNVIDIAPublicVariableGuid, EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS, sizeof (BootParams->BootChain), &BootParams->BootChain);
-  if (EFI_ERROR (Status)) {
-    ErrorPrint (L"Failed to set OS variable: %r\r\n", Status);
-  }
+  DEBUG ((DEBUG_INFO, "%a: deterministic direct boot on chain A\r\n", __FUNCTION__));
 
   return EFI_SUCCESS;
 }
@@ -2756,6 +2671,10 @@ L4TLauncher (
   UINTN                      ExtLinuxBootOption;
   UINTN                      Index;
 
+  Print (L"VOLLEY modified L4TLauncher ${VOLLEY_BUILD_INFO}\r\n");
+  Print (L"VOLLEY features: KeyboardIgnored;DirectBootFixedDTB;NVMePrimary;SHA256Checks\r\n");
+  Print (L"VOLLEY target: %s\r\n", VOLLEY_SYSTEM_NAME);
+
   Status = gBS->HandleProtocol (ImageHandle, &gEfiLoadedImageProtocolGuid, (VOID **)&LoadedImage);
   if (EFI_ERROR (Status)) {
     ErrorPrint (L"%a: Unable to locate loaded image: %r\r\n", __FUNCTION__, Status);
@@ -2855,17 +2774,21 @@ L4TLauncher (
       do {
         Status = ProcessExtLinuxConfig (DeviceHandle, BootParams.BootChain, &ExtLinuxConfig, &RootFsDeviceHandle);
         if (EFI_ERROR (Status)) {
-          ErrorPrint (L"%a: Unable to process extlinux config: %r\r\n", __FUNCTION__, Status);
-          BootParams.BootMode = NVIDIA_L4T_BOOTMODE_BOOTIMG;
+          ErrorPrint (L"%a: ProcessExtLinuxConfig FAILED: %r\r\n", __FUNCTION__, Status);
+          // Volley: do NOT fall back to Android-style boot — it loads an
+          // unwanted initrd and breaks the deterministic boot contract.
+          ErrorPrint (L"%a: FATAL: no fallback boot path\r\n", __FUNCTION__);
           break;
         }
+
+        ErrorPrint (L"%a: RootFsDeviceHandle = 0x%p\r\n", __FUNCTION__, RootFsDeviceHandle);
 
         ExtLinuxBootOption = ExtLinuxBootMenu (&ExtLinuxConfig);
 
         Status = ExtLinuxBoot (ImageHandle, RootFsDeviceHandle, &ExtLinuxConfig.BootOptions[ExtLinuxBootOption]);
         if (EFI_ERROR (Status)) {
           ErrorPrint (L"%a: Unable to boot via extlinux: %r\r\n", __FUNCTION__, Status);
-          BootParams.BootMode = NVIDIA_L4T_BOOTMODE_BOOTIMG;
+          ErrorPrint (L"%a: FATAL: no fallback boot path\r\n", __FUNCTION__);
           break;
         }
       } while (FALSE);
