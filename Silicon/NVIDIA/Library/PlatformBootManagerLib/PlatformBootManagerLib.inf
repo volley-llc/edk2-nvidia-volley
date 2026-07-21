@@ -43,7 +43,6 @@
   BaseLib
   BaseMemoryLib
   BootLogoLib
-  CapsuleLib
   DebugLib
   DevicePathLib
   DxeServicesLib
@@ -108,6 +107,7 @@
   gEfiFileSystemVolumeLabelInfoIdGuid
   gEfiFirmwarePerformanceGuid
   gEfiEndOfDxeEventGroupGuid
+  gEfiGlobalVariableGuid
   gEfiTtyTermGuid
   gEfiAcpiTableGuid
   gFdtTableGuid
@@ -127,14 +127,12 @@
   gEfiLoadedImageProtocolGuid
   gEfiPciRootBridgeIoProtocolGuid
   gEfiSimpleFileSystemProtocolGuid
-  gEsrtManagementProtocolGuid
   gPlatformBootManagerProtocolGuid
   gEfiSimpleTextOutProtocolGuid
   gEfiSimpleTextInProtocolGuid
   gEfiDevicePathProtocolGuid
   gEfiGenericMemTestProtocolGuid                ## CONSUMES
   gIpmiTransportProtocolGuid
-  gNVIDIABootChainProtocolGuid
   gEfiFirmwareVolume2ProtocolGuid
   gEfiLoadFileProtocolGuid
   gEfiAcpiSdtProtocolGuid

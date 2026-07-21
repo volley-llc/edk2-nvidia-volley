@@ -13,6 +13,7 @@
 
 #include <IndustryStandard/Pci22.h>
 #include <Library/BootLogoLib.h>
+#include <Library/BaseLib.h>
 #include <Library/CapsuleLib.h>
 #include <Library/DebugLib.h>
 #include <Library/DevicePathLib.h>
@@ -30,7 +31,6 @@
 #include <Library/PerformanceLib.h>
 #include <Library/PlatformResourceLib.h>
 #include <Library/PrintLib.h>
-#include <Library/DxeCapsuleLibFmp/CapsuleOnDisk.h>
 #include <Library/DtPlatformDtbLoaderLib.h>
 #include <Library/NVIDIADebugLib.h>
 #include <Library/TimerLib.h>
@@ -43,7 +43,6 @@
 #include <Protocol/BootChainProtocol.h>
 #include <Protocol/DeferredImageLoad.h>
 #include <Protocol/DevicePath.h>
-#include <Protocol/EsrtManagement.h>
 #include <Protocol/GenericMemoryTest.h>
 #include <Protocol/GraphicsOutput.h>
 #include <Protocol/LoadedImage.h>
@@ -59,6 +58,7 @@
 #include <Uefi/UefiSpec.h>
 #include <Guid/EventGroup.h>
 #include <Guid/FirmwarePerformance.h>
+#include <Guid/GlobalVariable.h>
 #include <Guid/RtPropertiesTable.h>
 #include <Guid/TtyTerm.h>
 #include <Guid/SerialPortLibVendor.h>
@@ -70,38 +70,6 @@
 #define MAX_STRING_SIZE              256
 
 #define DP_NODE_LEN(Type)  { (UINT8)sizeof (Type), (UINT8)(sizeof (Type) >> 8) }
-
-#pragma pack (1)
-typedef struct {
-  USB_CLASS_DEVICE_PATH       Keyboard;
-  EFI_DEVICE_PATH_PROTOCOL    End;
-} PLATFORM_USB_KEYBOARD;
-#pragma pack ()
-
-STATIC PLATFORM_USB_KEYBOARD  mUsbKeyboard = {
-  //
-  // USB_CLASS_DEVICE_PATH Keyboard
-  //
-  {
-    {
-      MESSAGING_DEVICE_PATH, MSG_USB_CLASS_DP,
-      DP_NODE_LEN (USB_CLASS_DEVICE_PATH)
-    },
-    0xFFFF, // VendorId: any
-    0xFFFF, // ProductId: any
-    3,      // DeviceClass: HID
-    1,      // DeviceSubClass: boot
-    1       // DeviceProtocol: keyboard
-  },
-
-  //
-  // EFI_DEVICE_PATH_PROTOCOL End
-  //
-  {
-    END_DEVICE_PATH_TYPE, END_ENTIRE_DEVICE_PATH_SUBTYPE,
-    DP_NODE_LEN (EFI_DEVICE_PATH_PROTOCOL)
-  }
-};
 
 STATIC PLATFORM_CONFIGURATION_DATA  CurrentPlatformConfigData;
 EFI_RSC_HANDLER_PROTOCOL            *mRscHandler = NULL;
@@ -496,48 +464,6 @@ MemoryTest (
 }
 
 /**
-  This FILTER_FUNCTION checks if a handle corresponds to a PCI display device.
-**/
-STATIC
-BOOLEAN
-EFIAPI
-IsPciDisplay (
-  IN EFI_HANDLE    Handle,
-  IN CONST CHAR16  *ReportText
-  )
-{
-  EFI_STATUS           Status;
-  EFI_PCI_IO_PROTOCOL  *PciIo;
-  PCI_TYPE00           Pci;
-
-  Status = gBS->HandleProtocol (
-                  Handle,
-                  &gEfiPciIoProtocolGuid,
-                  (VOID **)&PciIo
-                  );
-  if (EFI_ERROR (Status)) {
-    //
-    // This is not an error worth reporting.
-    //
-    return FALSE;
-  }
-
-  Status = PciIo->Pci.Read (
-                        PciIo,
-                        EfiPciIoWidthUint32,
-                        0 /* Offset */,
-                        sizeof Pci / sizeof (UINT32),
-                        &Pci
-                        );
-  if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "%a: %s: %r\n", __FUNCTION__, ReportText, Status));
-    return FALSE;
-  }
-
-  return IS_PCI_DISPLAY (&Pci);
-}
-
-/**
   This CALLBACK_FUNCTION attempts to connect a handle non-recursively, asking
   the matching driver to produce all first-level child handles.
 **/
@@ -563,127 +489,6 @@ Connect (
     __FUNCTION__,
     ReportText,
     Status
-    ));
-}
-
-/**
-  This CALLBACK_FUNCTION retrieves the EFI_DEVICE_PATH_PROTOCOL from the
-  handle, and adds it to ConOut and ErrOut.
-**/
-STATIC
-VOID
-EFIAPI
-AddOutput (
-  IN EFI_HANDLE    Handle,
-  IN CONST CHAR16  *ReportText
-  )
-{
-  EFI_STATUS                Status;
-  EFI_DEVICE_PATH_PROTOCOL  *DevicePath;
-
-  DevicePath = DevicePathFromHandle (Handle);
-  if (DevicePath == NULL) {
-    DEBUG ((
-      DEBUG_ERROR,
-      "%a: %s: handle %p: device path not found\n",
-      __FUNCTION__,
-      ReportText,
-      Handle
-      ));
-    return;
-  }
-
-  Status = EfiBootManagerUpdateConsoleVariable (ConOut, DevicePath, NULL);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((
-      DEBUG_ERROR,
-      "%a: %s: adding to ConOut: %r\n",
-      __FUNCTION__,
-      ReportText,
-      Status
-      ));
-    return;
-  }
-
-  Status = EfiBootManagerUpdateConsoleVariable (ErrOut, DevicePath, NULL);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((
-      DEBUG_ERROR,
-      "%a: %s: adding to ErrOut: %r\n",
-      __FUNCTION__,
-      ReportText,
-      Status
-      ));
-    return;
-  }
-
-  DEBUG ((
-    DEBUG_VERBOSE,
-    "%a: %s: added to ConOut and ErrOut\n",
-    __FUNCTION__,
-    ReportText
-    ));
-}
-
-/**
-  This CALLBACK_FUNCTION retrieves the vendor and device id of all pcie
-  devices and prints it.
-**/
-STATIC
-VOID
-EFIAPI
-ListPciDevices (
-  IN EFI_HANDLE    Handle,
-  IN CONST CHAR16  *ReportText
-  )
-{
-  EFI_STATUS           Status;
-  EFI_PCI_IO_PROTOCOL  *PciIo;
-  PCI_TYPE00           Pci;
-  UINTN                Segment;
-  UINTN                Bus;
-  UINTN                Device;
-  UINTN                Function;
-
-  Status = gBS->HandleProtocol (
-                  Handle,
-                  &gEfiPciIoProtocolGuid,
-                  (VOID **)&PciIo
-                  );
-  if (EFI_ERROR (Status)) {
-    return;
-  }
-
-  Status = PciIo->Pci.Read (
-                        PciIo,
-                        EfiPciIoWidthUint32,
-                        0,
-                        sizeof (Pci) / sizeof (UINT32),
-                        &Pci
-                        );
-  if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "%a: %s: %r\n", __FUNCTION__, ReportText, Status));
-    return;
-  }
-
-  Status = PciIo->GetLocation (
-                    PciIo,
-                    &Segment,
-                    &Bus,
-                    &Device,
-                    &Function
-                    );
-
-  DEBUG ((
-    DEBUG_ERROR,
-    "%a: Segment: %02x\t Bus: 0x%02x\t Device: 0x%02x\t Function: 0x%02x\tVendor ID: 0x%04x\tDevice ID:0x%04x\n",
-    __FUNCTION__,
-    Segment,
-    Bus,
-    Device,
-    Function,
-    Pci.Hdr.VendorId,
-    Pci.Hdr.DeviceId
     ));
 }
 
@@ -1133,11 +938,6 @@ PlatformRegisterOptionsAndKeys (
 {
   EFI_STATUS                    Status;
   EFI_INPUT_KEY                 Enter;
-  EFI_INPUT_KEY                 F11;
-  EFI_INPUT_KEY                 Esc;
-  EFI_BOOT_MANAGER_LOAD_OPTION  BootOption;
-
-  ZeroMem (&BootOption, sizeof (EFI_BOOT_MANAGER_LOAD_OPTION));
 
   GetPlatformOptions ();
 
@@ -1148,40 +948,6 @@ PlatformRegisterOptionsAndKeys (
   Enter.UnicodeChar = CHAR_CARRIAGE_RETURN;
   Status            = EfiBootManagerRegisterContinueKeyOption (0, &Enter, NULL);
   ASSERT_EFI_ERROR (Status);
-
-  //
-  // Map ESC to Boot Manager Menu
-  //
-  Esc.ScanCode    = SCAN_ESC;
-  Esc.UnicodeChar = CHAR_NULL;
-  Status          = EfiBootManagerGetBootManagerMenu (&BootOption);
-  if (!EFI_ERROR (Status)) {
-    Status = EfiBootManagerAddKeyOptionVariable (
-               NULL,
-               (UINT16)BootOption.OptionNumber,
-               0,
-               &Esc,
-               NULL
-               );
-    ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
-  }
-
-  //
-  // Map F11 to Boot Menu App (defined by PcdBootMenuAppFile)
-  //
-  F11.ScanCode    = SCAN_F11;
-  F11.UnicodeChar = CHAR_NULL;
-  Status          = EfiBootManagerGetBootMenuApp (&BootOption);
-  if (!EFI_ERROR (Status)) {
-    Status = EfiBootManagerAddKeyOptionVariable (
-               NULL,
-               (UINT16)BootOption.OptionNumber,
-               0,
-               &F11,
-               NULL
-               );
-    ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
-  }
 }
 
 /**
@@ -1195,48 +961,20 @@ DisplaySystemAndHotkeyInformation (
   VOID
   )
 {
-  BOOLEAN                       ShellHotkeySupported;
-  EFI_BOOT_MANAGER_LOAD_OPTION  BootOption;
-
-  CheckUefiShellLoadOption (&ShellHotkeySupported);
-  if (ShellHotkeySupported && (PcdGet16 (PcdShellHotkey) == CHAR_NULL)) {
-    ShellHotkeySupported = FALSE;
-  }
-
   //
-  // Show NVIDIA Internal Banner.
+  // Volley: headless - print the firmware banner on the serial console only,
+  // skip the GOP/centered-UI and hotkey prompts entirely.
   //
   if (PcdGetBool (PcdTegraPrintInternalBanner)) {
-    PrintCentered (gST->ConOut->Mode->CursorRow, L"********** FOR NVIDIA INTERNAL USE ONLY **********\r\n");
+    Print (L"********** FOR NVIDIA INTERNAL USE ONLY **********\n");
   }
 
-  //
-  // Show system information.
-  //
-  PrintCentered (gST->ConOut->Mode->CursorRow, L"%s System firmware\r\n", (CHAR16 *)PcdGetPtr (PcdPlatformFamilyName));
-  PrintCentered (gST->ConOut->Mode->CursorRow, L"version %s\r\n", (CHAR16 *)PcdGetPtr (PcdFirmwareVersionString));
-  PrintCentered (gST->ConOut->Mode->CursorRow, L"date %s\r\n", (CHAR16 *)PcdGetPtr (PcdFirmwareReleaseDateString));
-
-  //
-  // Display hotkey information at upper left corner.
-  //
-  gST->ConOut->SetCursorPosition (gST->ConOut, 0, gST->ConOut->Mode->CursorRow + 1);
-
-  if (PcdGet16 (PcdPlatformBootTimeOut) != 0) {
-    if (!EFI_ERROR (EfiBootManagerGetBootManagerMenu (&BootOption))) {
-      Print (L"ESC   to enter Setup.\r\n");
-    }
-
-    if (!EFI_ERROR (EfiBootManagerGetBootMenuApp (&BootOption))) {
-      Print (L"F11   to enter Boot Manager Menu.\r\n");
-    }
-
-    if (ShellHotkeySupported) {
-      Print (L"%c     to enter Shell.\r\n", PcdGet16 (PcdShellHotkey));
-    }
-
-    Print (L"Enter to continue boot.\r\n");
-  }
+  Print (
+    L"%s UEFI firmware (version %s built on %s)\n\r",
+    (CHAR16 *)PcdGetPtr (PcdPlatformFamilyName),
+    (CHAR16 *)PcdGetPtr (PcdFirmwareVersionString),
+    (CHAR16 *)PcdGetPtr (PcdFirmwareReleaseDateString)
+    );
 }
 
 STATIC
@@ -1380,6 +1118,30 @@ PlatformConfigured (
   }
 }
 
+STATIC
+VOID
+DeleteBootNextVariable (
+  VOID
+  )
+{
+  EFI_STATUS  Status;
+
+  Status = gRT->SetVariable (
+                  L"BootNext",
+                  &gEfiGlobalVariableGuid,
+                  EFI_VARIABLE_NON_VOLATILE |
+                  EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                  EFI_VARIABLE_RUNTIME_ACCESS,
+                  0,
+                  NULL
+                  );
+  if (!EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_INFO, "%a: deleted stale BootNext override\n", __FUNCTION__));
+  } else if (Status != EFI_NOT_FOUND) {
+    DEBUG ((DEBUG_WARN, "%a: failed to delete BootNext override: %r\n", __FUNCTION__, Status));
+  }
+}
+
 /**
   Update ConOut, ErrOut, ConIn variables to contain all available devices.
   For initial boot, all consoles are registered. Afterwards, only GOP consoles
@@ -1405,6 +1167,9 @@ PlatformRegisterConsoles (
 
   ASSERT (FixedPcdGet8 (PcdDefaultTerminalType) == 4);
 
+  // Headless: Register only serial console for output, skip display/USB
+  // Serial console is identified by NOT having GraphicsOutputProtocol
+
   Status = gBS->LocateHandleBuffer (
                   ByProtocol,
                   &gEfiSimpleTextOutProtocolGuid,
@@ -1414,65 +1179,39 @@ PlatformRegisterConsoles (
                   );
   if (!EFI_ERROR (Status)) {
     for (Count = 0; Count < NoHandles; Count++) {
+      // Check if this handle has GraphicsOutputProtocol (display device)
       Status = gBS->HandleProtocol (
                       Handles[Count],
                       &gEfiGraphicsOutputProtocolGuid,
                       (VOID **)&Gop
                       );
-      if (!EFI_ERROR (Status)) {
-        DEBUG ((
-          DEBUG_INFO,
-          "%a: GraphicsOutputProtocol supported on SimpleTextOutProtocol handle 0x%p\n",
-          __FUNCTION__,
-          Handles[Count]
-          ));
-      } else {
-        Gop = NULL;
-      }
 
-      Status = gBS->HandleProtocol (
-                      Handles[Count],
-                      &gEfiDevicePathProtocolGuid,
-                      (VOID **)&Interface
-                      );
-      if (!EFI_ERROR (Status)) {
-        DEBUG ((
-          DEBUG_INFO,
-          "%a: DevicePathProtocol supported on SimpleTextOutProtocol handle 0x%p\n",
-          __FUNCTION__,
-          Handles[Count]
-          ));
-        if ((InitialConsoleRegistration == TRUE) || (Gop != NULL)) {
+      if (EFI_ERROR (Status)) {
+        // No GOP = serial/UART console, register it for output
+        Status = gBS->HandleProtocol (
+                        Handles[Count],
+                        &gEfiDevicePathProtocolGuid,
+                        (VOID **)&Interface
+                        );
+        if (!EFI_ERROR (Status)) {
+          // Register serial console for output only
           EfiBootManagerUpdateConsoleVariable (ConOut, Interface, NULL);
           EfiBootManagerUpdateConsoleVariable (ErrOut, Interface, NULL);
+          DEBUG ((
+            DEBUG_INFO,
+            "%a: Registered serial console for output\n",
+            __FUNCTION__
+            ));
         }
       }
+      // Skip handles with GOP (display devices) - headless mode
     }
 
     gBS->FreePool (Handles);
   }
 
-  Status = gBS->LocateHandleBuffer (
-                  ByProtocol,
-                  &gEfiSimpleTextInProtocolGuid,
-                  NULL,
-                  &NoHandles,
-                  &Handles
-                  );
-  if (!EFI_ERROR (Status)) {
-    for (Count = 0; Count < NoHandles; Count++) {
-      Status = gBS->HandleProtocol (
-                      Handles[Count],
-                      &gEfiDevicePathProtocolGuid,
-                      (VOID **)&Interface
-                      );
-      if (!EFI_ERROR (Status)) {
-        EfiBootManagerUpdateConsoleVariable (ConIn, Interface, NULL);
-      }
-    }
-
-    gBS->FreePool (Handles);
-  }
+  // Headless: Skip ConIn registration to prevent keyboard input
+  // Keyboard input is already suppressed by VolleyOverrides
 }
 
 /**
@@ -2039,6 +1778,11 @@ PlatformBootManagerBeforeConsole (
   WaitForAsyncDrivers ();
 
   //
+  // Volley: no boot-menu wait, ever.
+  //
+  PcdSet16S (PcdPlatformBootTimeOut, 0);
+
+  //
   // Signal EndOfDxe PI Event
   //
   EfiEventGroupSignal (&gEfiEndOfDxeEventGroupGuid);
@@ -2058,17 +1802,15 @@ PlatformBootManagerBeforeConsole (
   FilterAndProcess (&gEfiPciRootBridgeIoProtocolGuid, NULL, Connect);
 
   //
-  // Find all display class PCI devices (using the handles from the previous
-  // step), and connect them non-recursively. This should produce a number of
-  // child handles with GOPs on them.
+  // Volley: headless - skip connecting display devices and GOP console output.
   //
-  FilterAndProcess (&gEfiPciIoProtocolGuid, IsPciDisplay, Connect);
 
   //
-  // Now add the device path of all handles with GOP on them to ConOut and
-  // ErrOut.
+  // Volley: keep NVMe/L4T priority deterministic on every boot. SetBootOrder
+  // re-evaluates the order each time (see PlatformBootOrderLib), so a
+  // tampered/stale BootOrder cannot survive a reboot.
   //
-  FilterAndProcess (&gEfiGraphicsOutputProtocolGuid, NULL, AddOutput);
+  SetBootOrder ();
 
   //
   // Find all PCI devices (using the handles from the previous step), and
@@ -2081,9 +1823,9 @@ PlatformBootManagerBeforeConsole (
       PlatformReconfigured = TRUE;
 
       //
-      // Connect the rest of the devices.
+      // Volley: headless - skip connecting all devices (avoids USB/display
+      // enumeration stalls; NVMe is connected via the PCI root bridge above).
       //
-      EfiBootManagerConnectAll ();
 
       //
       // Wait for any polled enumeration to finish
@@ -2108,6 +1850,10 @@ PlatformBootManagerBeforeConsole (
       //
       // Register UEFI Shell
       //
+      // Volley: never register the UEFI Shell boot option (deterministic,
+      // non-interactive boot). Consider CONFIG_SHELL=n in the defconfig too.
+      UefiShellEnabled = FALSE;
+
       if (UefiShellEnabled) {
         PlatformRegisterFvBootOption (
           &gUefiShellFileGuid,
@@ -2172,9 +1918,7 @@ PlatformBootManagerBeforeConsole (
     ProcessIPMIBootOrderUpdates ();
   } else {
     //
-    // Connect the rest of the devices.
-    //
-    EfiBootManagerConnectAll ();
+    // Headless: skip connecting all devices (avoid USB/display).
 
     //
     // Signal ConnectComplete Event
@@ -2201,11 +1945,7 @@ PlatformBootManagerBeforeConsole (
   //
   // Add the hardcoded short-form USB keyboard device path to ConIn.
   //
-  EfiBootManagerUpdateConsoleVariable (
-    ConIn,
-    (EFI_DEVICE_PATH_PROTOCOL *)&mUsbKeyboard,
-    NULL
-    );
+  DEBUG ((DEBUG_INFO, "%a: skipping USB keyboard registration\n", __FUNCTION__));
 
   //
   // Register all available consoles during intitial
@@ -2237,10 +1977,10 @@ PlatformBootManagerBeforeConsole (
          NULL
          );
   Status = gDS->Dispatch ();
-  // Connect drivers if new driver was dispatched.
-  // Do this if the platform is doing full connects
+  // Volley: headless - never ConnectAll, even after dispatching new drivers
+  // (avoids USB/display enumeration; NVMe comes up via the PCI root bridges).
   if (PlatformReconfigured && !EFI_ERROR (Status)) {
-    EfiBootManagerConnectAll ();
+    DEBUG ((DEBUG_INFO, "%a: skipping ConnectAll after driver dispatch (headless)\n", __FUNCTION__));
   }
 }
 
@@ -2653,15 +2393,8 @@ ConfigureConsole (
 }
 
 /**
-  Do the platform specific action after the console is ready
-  Possible things that can be done in PlatformBootManagerAfterConsole:
-  > Console post action:
-    > Dynamically switch output mode from 100x31 to 80x25 for certain scenario
-    > Signal console ready platform customized event
-  > Run diagnostics like memory testing
-  > Connect certain devices
-  > Dispatch additional option roms
-  > Special boot: e.g.: USB boot, enter UI
+  Do the platform specific action after the console is ready.
+  Volley: Skip splash, diagnostics, and capsule processing for fast boot.
 **/
 VOID
 EFIAPI
@@ -2672,48 +2405,38 @@ PlatformBootManagerAfterConsole (
   // Print the BootOrder information
   PrintCurrentBootOrder (DEBUG_ERROR);
 
-  // Configure the console
+  // Configure the console (serial modes/attributes)
   ConfigureConsole ();
 
   //
-  // Show the splash screen.
+  // Volley: headless/fast, deterministic path - skip the GOP splash, memory
+  // test, IPMI prints, capsule processing, and boot-chain updates (chain A is
+  // forced in PrePi; capsule/OTA updates are handled by the OS updater).
+  // The dead references below keep the STATIC helpers compiled without
+  // -Werror=unused-function noise.
   //
-  BootLogoEnableLogo ();
+  if (FALSE) {
+    PrintBmcIpAddresses ();
+    HandleCapsules ();
+    HandleBootChainUpdate ();
+  }
 
   //
-  // Display system and hotkey information after console is ready.
+  // Display firmware banner on the serial console.
   //
   if (!PlatformGetSingleBootApp (NULL) && PcdGetBool (PcdDisplayBootInfo)) {
     DisplaySystemAndHotkeyInformation ();
   }
 
   //
-  // Run memory test
-  //
-  MemoryTest ();
-
-  // Ipmi communication
-  PrintBmcIpAddresses ();
-
-  //
-  // On ARM, there is currently no reason to use the phased capsule
-  // update approach where some capsules are dispatched before EndOfDxe
-  // and some are dispatched after. So just handle all capsules here,
-  // when the console is up and we can actually give the user some
-  // feedback about what is going on.
-  //
-  HandleCapsules ();
-
-  //
   // Lock TPM platform hierarchy
   //
   LockTpmPlatformHierarchy ();
 
-  HandleBootChainUpdate ();
-
   // Validate acpi to be present
   VerifyAcpiSanity ();
 }
+
 
 /**
   This function is called each second during the boot manager waits the
@@ -2727,39 +2450,7 @@ PlatformBootManagerWaitCallback (
   UINT16  TimeoutRemain
   )
 {
-  EFI_GRAPHICS_OUTPUT_BLT_PIXEL_UNION  Black;
-  EFI_GRAPHICS_OUTPUT_BLT_PIXEL_UNION  White;
-  UINT16                               Timeout;
-  EFI_STATUS                           Status;
-  EFI_STRING                           ProgressTitle;
-
-  ProgressTitle = NULL;
-  Timeout       = PcdGet16 (PcdPlatformBootTimeOut);
-  ProgressTitle = (EFI_STRING)PcdGetPtr (PcdBootManagerWaitMessage);
-
-  ASSERT (ProgressTitle != NULL);
-
-  //
-  // BootLogoUpdateProgress does not expect empty string
-  //
-  if ((ProgressTitle == NULL) || (StrLen (ProgressTitle) == 0)) {
-    ProgressTitle = L" ";
-  }
-
-  Black.Raw = 0x00000000;
-  White.Raw = 0x00FFFFFF;
-
-  Status = BootLogoUpdateProgress (
-             White.Pixel,
-             Black.Pixel,
-             ProgressTitle,
-             White.Pixel,
-             (Timeout - TimeoutRemain) * 100 / Timeout,
-             0
-             );
-  if (EFI_ERROR (Status)) {
-    Print (L".");
-  }
+  return;
 }
 
 /**
@@ -2788,6 +2479,7 @@ PlatformBootManagerBdsEntry (
   VOID
   )
 {
+  DeleteBootNextVariable ();
   return;
 }
 
@@ -2800,6 +2492,11 @@ PlatformBootManagerPriorityBoot (
   UINT16  **BootNext
   )
 {
+  if (BootNext != NULL) {
+    *BootNext = NULL;
+  }
+
+  DeleteBootNextVariable ();
   return;
 }
 
