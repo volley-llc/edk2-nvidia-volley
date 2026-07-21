@@ -43,6 +43,7 @@
 #include <Protocol/BootChainProtocol.h>
 #include <Protocol/DeferredImageLoad.h>
 #include <Protocol/DevicePath.h>
+#include <Protocol/EsrtManagement.h>
 #include <Protocol/GenericMemoryTest.h>
 #include <Protocol/GraphicsOutput.h>
 #include <Protocol/LoadedImage.h>
@@ -108,47 +109,8 @@ VOID
   IN CONST CHAR16 *ReportText
   );
 
-/**
-  Prints a string to the console in the center of the screen at the specified
-  row.
-  Updates the cursor position.
+// Volley: PrintCentered removed (GOP/centered UI not used; headless serial only)
 
-  @param[in] Row     The row to print the string at.
-  @param[in] Format  The format string to print.
-  @param[in] ...     The arguments to print.
-**/
-STATIC
-VOID
-EFIAPI
-PrintCentered (
-  IN UINTN         Row,
-  IN CONST CHAR16  *Format,
-  ...
-  )
-{
-  CHAR16   String[MAX_STRING_SIZE];
-  VA_LIST  Marker;
-  UINTN    NumberOfChars;
-  UINTN    Columns;
-  UINTN    Rows;
-  UINTN    StartColumn;
-
-  VA_START (Marker, Format);
-  NumberOfChars = UnicodeVSPrint (String, sizeof (String), Format, Marker);
-  VA_END (Marker);
-
-  // Remove trailing linefeed and carriage return
-  while ((String[NumberOfChars] == CHAR_LINEFEED) ||
-         (String[NumberOfChars] == CHAR_CARRIAGE_RETURN))
-  {
-    NumberOfChars--;
-  }
-
-  gST->ConOut->QueryMode (gST->ConOut, gST->ConOut->Mode->Mode, &Columns, &Rows);
-  StartColumn = (Columns - NumberOfChars) / 2;
-  gST->ConOut->SetCursorPosition (gST->ConOut, StartColumn, Row);
-  gST->ConOut->OutputString (gST->ConOut, String);
-}
 
 /**
   Locate all handles that carry the specified protocol, filter them with a
@@ -489,6 +451,68 @@ Connect (
     __FUNCTION__,
     ReportText,
     Status
+    ));
+}
+
+/**
+  This CALLBACK_FUNCTION retrieves the vendor and device id of all pcie
+  devices and prints it.
+**/
+STATIC
+VOID
+EFIAPI
+ListPciDevices (
+  IN EFI_HANDLE    Handle,
+  IN CONST CHAR16  *ReportText
+  )
+{
+  EFI_STATUS           Status;
+  EFI_PCI_IO_PROTOCOL  *PciIo;
+  PCI_TYPE00           Pci;
+  UINTN                Segment;
+  UINTN                Bus;
+  UINTN                Device;
+  UINTN                Function;
+
+  Status = gBS->HandleProtocol (
+                  Handle,
+                  &gEfiPciIoProtocolGuid,
+                  (VOID **)&PciIo
+                  );
+  if (EFI_ERROR (Status)) {
+    return;
+  }
+
+  Status = PciIo->Pci.Read (
+                        PciIo,
+                        EfiPciIoWidthUint32,
+                        0,
+                        sizeof (Pci) / sizeof (UINT32),
+                        &Pci
+                        );
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "%a: %s: %r\n", __FUNCTION__, ReportText, Status));
+    return;
+  }
+
+  Status = PciIo->GetLocation (
+                    PciIo,
+                    &Segment,
+                    &Bus,
+                    &Device,
+                    &Function
+                    );
+
+  DEBUG ((
+    DEBUG_ERROR,
+    "%a: Segment: %02x\t Bus: 0x%02x\t Device: 0x%02x\t Function: 0x%02x\tVendor ID: 0x%04x\tDevice ID:0x%04x\n",
+    __FUNCTION__,
+    Segment,
+    Bus,
+    Device,
+    Function,
+    Pci.Hdr.VendorId,
+    Pci.Hdr.DeviceId
     ));
 }
 
