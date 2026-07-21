@@ -1600,6 +1600,11 @@ CONFIG_FMP_CERTIFICATES_DTB_MAX_SIZE=0
   Silicon/NVIDIA/Drivers/TegraPlatformInit/TegraPlatformInitDxe.inf
 
   #
+  # Volley-specific overrides (keyboard suppression, deterministic boot vars)
+  #
+  Platform/NVIDIA/Library/PlatformOverridesLib/VolleyOverrides.inf
+
+  #
   # Platform Configuration Manager Data
   #
 !ifdef CONFIG_CONFIG_MANAGER

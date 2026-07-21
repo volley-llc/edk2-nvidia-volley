@@ -665,6 +665,9 @@ FvNameGuid         = $(PLATFORM_GUID)
   #
   INF Silicon/NVIDIA/Drivers/TegraPlatformInit/TegraPlatformInitDxe.inf
 
+  # Volley-specific overrides (keyboard suppression, deterministic boot vars)
+  INF Platform/NVIDIA/Library/PlatformOverridesLib/VolleyOverrides.inf
+
   #
   # Custom HII Support
   #

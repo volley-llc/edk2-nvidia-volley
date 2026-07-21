@@ -1,0 +1,51 @@
+## @file
+# Volley-specific overrides library definition.
+#
+# SPDX-License-Identifier: BSD-2-Clause-Patent
+
+[Defines]
+  INF_VERSION               = 0x00010017
+  BASE_NAME                 = VolleyOverrides
+  FILE_GUID                 = 364dd318-e305-4a7c-bf67-a00e6f49f3d9
+  MODULE_TYPE               = DXE_DRIVER
+  VERSION_STRING            = 1.0
+  ENTRY_POINT               = VolleyOverridesEntry
+
+[Sources]
+  KeyboardSuppress.c
+  KeyboardSuppress.h
+  VolleyOverrides.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  EmbeddedPkg/EmbeddedPkg.dec
+  Silicon/NVIDIA/NVIDIA.dec
+  NetworkPkg/NetworkPkg.dec
+
+[LibraryClasses]
+  DebugLib
+  MemoryAllocationLib
+  BaseMemoryLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+  UefiBootManagerLib
+  UefiRuntimeServicesTableLib
+  PrintLib
+  DevicePathLib
+  FileHandleLib
+  BaseLib
+  NetLib
+
+[Protocols]
+  gEfiSimpleTextInProtocolGuid
+  gEfiSimpleTextInputExProtocolGuid
+  gNVIDIACvmEepromProtocolGuid
+
+[Guids]
+  gEfiGlobalVariableGuid
+  gNVIDIAPublicVariableGuid
+  gNVIDIATokenSpaceGuid
+
+[Depex]
+  TRUE
