@@ -682,6 +682,22 @@ ParseDefaultBootPriority (
   UINTN                       BootClassIndex;
 
   Priority = 0;
+
+  //
+  // Volley: force NVMe to be the highest boot priority regardless of the
+  // DefaultBootPriority variable contents. The Orin NX trainer boots only
+  // from NVMe (VOLLEY_A/VOLLEY_B slots + installer all live on nvme0n1).
+  // Seeded first, so GetBootClassOfName () always matches this entry.
+  // (Xavier forced eMMC here; ornx has no eMMC.)
+  //
+  Status = AppendBootOrderPriority ((CHAR8 *)"nvme", AsciiStrLen ("nvme"), &ClassBootPriority);
+  if (!EFI_ERROR (Status) && (ClassBootPriority != NULL)) {
+    DEBUG ((DEBUG_INFO, "Volley: forcing %a priority to %d\r\n", ClassBootPriority->OrderName, Priority));
+    ClassBootPriority->PriorityOrder = Priority++;
+  } else {
+    DEBUG ((DEBUG_ERROR, "Volley: failed to force nvme boot priority: %r\r\n", Status));
+  }
+
   // Process the priority order
   Status = GetVariable2 (
              L"DefaultBootPriority",
@@ -812,24 +828,33 @@ SetBootOrder (
                         &VariableSize,
                         (VOID *)&VariableData
                         );
-  if (!EFI_ERROR (Status) && (VariableSize == sizeof (BOOLEAN))) {
-    if (VariableData == TRUE) {
-      return;
-    }
+  //
+  // Volley: never trust the sticky PlatformBootOrderSet flag - re-evaluate the
+  // boot order on every boot so a tampered/stale BootOrder cannot survive a
+  // reboot. (Xavier commits: "Set BootOrder deterministically".)
+  //
+  if (!EFI_ERROR (Status) && (VariableSize == sizeof (BOOLEAN)) && (VariableData == TRUE)) {
+    DEBUG ((DEBUG_VERBOSE, "%a: PlatformBootOrderSet is true; rechecking order anyway\r\n", __FUNCTION__));
   }
 
   ParseDefaultBootPriority ();
 
   EfiBootManagerSortLoadOptionVariable (LoadOptionTypeBoot, BootOrderSortCompare);
 
-  VariableData = TRUE;
-  gRT->SetVariable (
-         L"PlatformBootOrderSet",
-         &gNVIDIATokenSpaceGuid,
-         EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_NON_VOLATILE,
-         sizeof (BOOLEAN),
-         &VariableData
-         );
+  //
+  // Only write the flag when it was not already TRUE (avoids NV variable
+  // churn on every boot).
+  //
+  if (VariableData != TRUE) {
+    VariableData = TRUE;
+    gRT->SetVariable (
+           L"PlatformBootOrderSet",
+           &gNVIDIATokenSpaceGuid,
+           EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_NON_VOLATILE,
+           sizeof (BOOLEAN),
+           &VariableData
+           );
+  }
 
   return;
 }
