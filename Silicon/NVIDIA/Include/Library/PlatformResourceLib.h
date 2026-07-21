@@ -323,6 +323,20 @@ SetNextBootChain (
   );
 
 /**
+  Volley: force the next boot chain to A and clear firmware chain failure
+  status.
+
+  @retval EFI_SUCCESS           Operation successful
+  @retval others                Error occurred
+
+**/
+EFI_STATUS
+EFIAPI
+ForceNextBootChainA (
+  VOID
+  );
+
+/**
   Clear UpdateBrBct flag
 
   @retval none

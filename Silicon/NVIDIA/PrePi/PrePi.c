@@ -423,6 +423,16 @@ CEntryPoint (
   InitialMemory[1].Attributes   = (ARM_MEMORY_REGION_ATTRIBUTES)0;
   InitMmu (InitialMemory);
   MapCorePlatformMemory ();
+
+  //
+  // Volley: force the next boot chain to A before anything else can act on
+  // the scratch register (deterministic boot; chain B is never used).
+  //
+  Status = ForceNextBootChainA ();
+  if (EFI_ERROR (Status)) {
+    DEBUG ((EFI_D_ERROR, "Failed to force next boot chain A: %r\n", Status));
+  }
+
   StatusRegSetPhase (STATUS_REG_PHASE_PREPI, STATUS_REG_PREPI_STARTED);
 
   // Initialize the Serial Port

@@ -14,6 +14,7 @@
 #include <Library/PlatformResourceLib.h>
 
 #define BOOT_CHAIN_SCRATCH_OFFSET  0x3cc
+#define BOOT_CHAIN_A               0
 #define BOOT_CHAIN_MAX             2
 #define BOOT_CHAIN_BIT_FIELD_LO    4
 #define BOOT_CHAIN_BIT_FIELD_HI    5

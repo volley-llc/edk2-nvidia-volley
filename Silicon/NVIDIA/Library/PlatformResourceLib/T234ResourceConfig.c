@@ -560,15 +560,13 @@ T234GetActiveBootChain (
   OUT UINT32  *BootChain
   )
 {
-  *BootChain = MmioBitFieldRead32 (
-                 FixedPcdGet64 (PcdBootChainRegisterBaseAddressT234),
-                 BOOT_CHAIN_BIT_FIELD_LO,
-                 BOOT_CHAIN_BIT_FIELD_HI
-                 );
+  //
+  // Volley: the boot chain is always A. Never report B (deterministic boot;
+  // slot redundancy is handled at the OS/NVMe level, not the firmware chain).
+  //
+  (VOID)CpuBootloaderAddress;
 
-  if (*BootChain >= BOOT_CHAIN_MAX) {
-    return EFI_UNSUPPORTED;
-  }
+  *BootChain = BOOT_CHAIN_A;
 
   return EFI_SUCCESS;
 }
@@ -792,6 +790,34 @@ SetNextBootChain (
     FixedPcdGet64 (PcdBootChainRegisterBaseAddressT234),
     BootChain,
     BootChain,
+    BOOT_CHAIN_GOOD
+    );
+
+  return EFI_SUCCESS;
+}
+
+/**
+  Volley: force the next boot chain to A and clear chain failure status.
+  Called from PrePi so the scratch register never points at chain B.
+
+**/
+EFI_STATUS
+EFIAPI
+ForceNextBootChainA (
+  VOID
+  )
+{
+  MmioBitFieldWrite32 (
+    FixedPcdGet64 (PcdBootChainRegisterBaseAddressT234),
+    BOOT_CHAIN_BIT_FIELD_LO,
+    BOOT_CHAIN_BIT_FIELD_HI,
+    BOOT_CHAIN_A
+    );
+
+  MmioBitFieldWrite32 (
+    FixedPcdGet64 (PcdBootChainRegisterBaseAddressT234),
+    BOOT_CHAIN_STATUS_LO,
+    BOOT_CHAIN_STATUS_HI,
     BOOT_CHAIN_GOOD
     );
 
