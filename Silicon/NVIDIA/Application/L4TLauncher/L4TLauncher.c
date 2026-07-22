@@ -1938,7 +1938,11 @@ ParseKeyValueFile(
 }
 
 /**
-  Callback for parsing boot_config.txt - extracts expected_nvme_uuid
+  Callback for parsing boot_config.txt.
+
+  No keys are required: the file's presence is the "system installed" signal
+  (see VOLLEY_BOOT_CONFIG). expected_nvme_uuid is accepted and ignored so
+  configs written by older installers remain valid.
 **/
 STATIC
 EFI_STATUS
@@ -1948,22 +1952,10 @@ BootConfigCallback(
     IN  VOID            *Context
 )
 {
-    VOLLEY_BOOT_CONFIG  *Config = (VOLLEY_BOOT_CONFIG *)Context;
-    RETURN_STATUS       ReturnStatus;
-    CHAR16              UuidStr[64];
-
     if (AsciiStrCmp(Key, "expected_nvme_uuid") == 0) {
-        // Convert ASCII to Unicode for GUID parsing
-        AsciiStrToUnicodeStrS(Value, UuidStr, sizeof(UuidStr) / sizeof(CHAR16));
-
-        // Parse the GUID string
-        ReturnStatus = StrToGuid(UuidStr, &Config->ExpectedNvmeUuid);
-        if (!RETURN_ERROR(ReturnStatus)) {
-            Config->Valid = TRUE;
-            DEBUG((DEBUG_INFO, "Volley: Parsed expected_nvme_uuid: %g\n", &Config->ExpectedNvmeUuid));
-        } else {
-            DEBUG((DEBUG_ERROR, "Volley: Failed to parse UUID: %a\n", Value));
-        }
+        DEBUG((DEBUG_INFO, "Volley: ignoring deprecated boot_config key: %a\n", Key));
+    } else {
+        DEBUG((DEBUG_INFO, "Volley: boot_config key: %a = %a\n", Key, Value));
     }
 
     return EFI_SUCCESS;
@@ -2016,16 +2008,18 @@ ReadVolleyBootConfig(
         return EFI_NOT_FOUND;
     }
 
-    // Parse the file
+    // Parse the file. A readable, parseable boot_config.txt is itself the
+    // "system installed" signal — no specific keys are required.
     Status = ParseKeyValueFile((CHAR8 *)FileData, (UINTN)FileSize, BootConfigCallback, Config);
 
     FreePool(FileData);
 
-    if (!Config->Valid) {
-        DEBUG((DEBUG_INFO, "Volley: boot_config.txt missing expected_nvme_uuid\n"));
-        return EFI_NOT_FOUND;
+    if (EFI_ERROR(Status)) {
+        DEBUG((DEBUG_INFO, "Volley: boot_config.txt parse failed: %r\n", Status));
+        return Status;
     }
 
+    Config->Valid = TRUE;
     return EFI_SUCCESS;
 }
 
@@ -2171,71 +2165,6 @@ FindNvmeDevice(
     FreePool(HandleBuffer);
     DEBUG((DEBUG_INFO, "Volley: No NVMe device found\n"));
     return EFI_NOT_FOUND;
-}
-
-/**
-  Read GPT header from device and extract DiskGUID.
-
-  @param[in]  BlockIo     Block I/O protocol for device
-  @param[out] DiskGuid    The GPT Disk GUID
-
-  @retval EFI_SUCCESS         GUID read successfully
-  @retval EFI_VOLUME_CORRUPTED Invalid GPT header
-**/
-STATIC
-EFI_STATUS
-ReadNvmeDiskGuid(
-    IN  EFI_BLOCK_IO_PROTOCOL   *BlockIo,
-    OUT EFI_GUID                *DiskGuid
-)
-{
-    EFI_STATUS                  Status;
-    VOID                        *Buffer = NULL;
-    UINT32                      BlockSize;
-    EFI_PARTITION_TABLE_HEADER  *GptHeader;
-
-    if (BlockIo == NULL || DiskGuid == NULL) {
-        return EFI_INVALID_PARAMETER;
-    }
-
-    BlockSize = BlockIo->Media->BlockSize;
-
-    // Allocate buffer for GPT header (LBA 1)
-    Buffer = AllocatePool(BlockSize);
-    if (Buffer == NULL) {
-        return EFI_OUT_OF_RESOURCES;
-    }
-
-    // Read LBA 1 (primary GPT header)
-    Status = BlockIo->ReadBlocks(
-        BlockIo,
-        BlockIo->Media->MediaId,
-        1,  // GPT header is at LBA 1
-        BlockSize,
-        Buffer
-    );
-
-    if (EFI_ERROR(Status)) {
-        DEBUG((DEBUG_ERROR, "Volley: Failed to read GPT header: %r\n", Status));
-        FreePool(Buffer);
-        return Status;
-    }
-
-    GptHeader = (EFI_PARTITION_TABLE_HEADER *)Buffer;
-
-    // Validate GPT signature
-    if (GptHeader->Header.Signature != EFI_PTAB_HEADER_ID) {
-        DEBUG((DEBUG_ERROR, "Volley: Invalid GPT signature\n"));
-        FreePool(Buffer);
-        return EFI_VOLUME_CORRUPTED;
-    }
-
-    // Extract DiskGUID
-    CopyGuid(DiskGuid, &GptHeader->DiskGUID);
-    DEBUG((DEBUG_INFO, "Volley: NVMe Disk GUID: %g\n", DiskGuid));
-
-    FreePool(Buffer);
-    return EFI_SUCCESS;
 }
 
 /**
@@ -2677,7 +2606,6 @@ VolleyDetermineBootMode(
     VOLLEY_BOOT_CONFIG          BootConfig;
     EFI_BLOCK_IO_PROTOCOL       *NvmeBlockIo = NULL;
     EFI_HANDLE                  NvmeDeviceHandle = NULL;
-    EFI_GUID                    NvmeDiskGuid;
     EFI_HANDLE                  SlotAHandle = NULL;
     EFI_HANDLE                  SlotBHandle = NULL;
     VOLLEY_SLOT_META            SlotAMeta;
@@ -2715,30 +2643,13 @@ VolleyDetermineBootMode(
         return EFI_SUCCESS;
     }
 
-    // Step 4: Read NVMe GPT DiskGUID
-    Status = ReadNvmeDiskGuid(NvmeBlockIo, &NvmeDiskGuid);
-    if (EFI_ERROR(Status)) {
-        ErrorPrint(L"Volley: Failed to read NVMe GPT header\r\n");
-        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_INSTALLER_APP_PARTUUID L")\r\n");
-        *BootMode = VOLLEY_MODE_INSTALL;
-        *RootFsHandle = InstallerAppHandle;
-        return EFI_SUCCESS;
-    }
+    // NOTE: Xavier had steps here reading the NVMe GPT DiskGUID and comparing
+    // it against boot_config's expected_nvme_uuid — needed because its
+    // two-step flash left the NVMe unpartitioned until first-boot install.
+    // On ornx the Jetson flash step partitions the NVMe itself, so the disk
+    // is correct by construction and those steps were removed.
 
-    // Step 5: Compare UUIDs
-    if (!CompareGuid(&NvmeDiskGuid, &BootConfig.ExpectedNvmeUuid)) {
-        ErrorPrint(L"Volley: NVMe UUID mismatch\r\n");
-        ErrorPrint(L"  Expected: %g\r\n", &BootConfig.ExpectedNvmeUuid);
-        ErrorPrint(L"  Actual:   %g\r\n", &NvmeDiskGuid);
-        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_INSTALLER_APP_PARTUUID L")\r\n");
-        *BootMode = VOLLEY_MODE_INSTALL;
-        *RootFsHandle = InstallerAppHandle;
-        return EFI_SUCCESS;
-    }
-
-    ErrorPrint(L"Volley: NVMe UUID matches (%g)\r\n", &NvmeDiskGuid);
-
-    // Step 6: Find partition handles for slots A and B
+    // Step 4: Find partition handles for slots A and B
     // Require a mountable filesystem and kernel image before reading slot_meta.txt
     Status = FindNvmePartitionByName(NvmeDeviceHandle, VOLLEY_SLOT_A_PART_NAME, &SlotAHandle);
     if (EFI_ERROR(Status)) {

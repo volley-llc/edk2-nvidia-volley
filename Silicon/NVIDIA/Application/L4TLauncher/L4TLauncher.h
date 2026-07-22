@@ -72,9 +72,15 @@ typedef enum {
 //
 // Parsed boot_config.txt from the ESP
 //
+// Presence of a readable boot_config.txt is the "system installed" signal.
+// Xavier additionally carried expected_nvme_uuid (GPT DiskGUID) because its
+// two-step flash (eMMC first, NVMe partitioned by the installer on first
+// boot) had to detect an unprepared NVMe. On ornx the Jetson flash step
+// partitions the NVMe itself, so the disk is correct by construction and the
+// UUID check was dropped.
+//
 typedef struct {
     BOOLEAN     Valid;              // TRUE if config was successfully parsed
-    EFI_GUID    ExpectedNvmeUuid;   // expected_nvme_uuid value (GPT DiskGUID)
 } VOLLEY_BOOT_CONFIG;
 
 // Slot verification limits
