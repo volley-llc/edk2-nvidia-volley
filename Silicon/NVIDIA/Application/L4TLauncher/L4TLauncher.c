@@ -54,8 +54,6 @@
 #define VOLLEY_DIRECT_KERNEL_PATH  L"boot\\Image"
 #endif
 
-#define VOLLEY_DTB_OVERRIDE_VAR  L"VolleyDtbPath"
-#define VOLLEY_DTB_PROFILE_VAR   L"VolleyDtbProfile"
 // Single-SKU: no industrial/commercial EEPROM split on Orin NX
 #define VOLLEY_DTB_ORNX_PATH     L"EFI\\volley\\dtb\\tegra234-p3768-0000-p3767-0000.dtb"
 #define VOLLEY_SYSTEM_NAME       L"${VOLLEY_SYSTEM_NAME}"
@@ -1387,35 +1385,16 @@ Exit:
 //
 
 /**
-  Return the DTB path to load from the ESP.
+  Return the fixed Orin NX DTB path to load from the ESP.
 
-  Honors an optional VolleyDtbPath EFI-variable override (set by tooling);
-  otherwise returns the fixed single-SKU path. Caller frees the result.
+  This firmware targets only the 16GB Orin NX on DSBOARD-ORNX. Do not honor
+  the Xavier-era VolleyDtbPath variable, which could redirect boot to an
+  incompatible tegra194 DTB. Caller frees the result.
 **/
 STATIC
 CHAR16* EFIAPI GetVolleyDtbPath(VOID)
 {
-    EFI_STATUS  Status;
-    UINTN       Size = 0;
-    CHAR16      *Path = NULL;
-
-    Status = gRT->GetVariable(VOLLEY_DTB_OVERRIDE_VAR, &gEfiGlobalVariableGuid, NULL, &Size, NULL);
-    if (Status == EFI_BUFFER_TOO_SMALL) {
-        Path = AllocateZeroPool(Size + sizeof(CHAR16));
-        if (Path != NULL) {
-            Status = gRT->GetVariable(VOLLEY_DTB_OVERRIDE_VAR, &gEfiGlobalVariableGuid, NULL, &Size, Path);
-            if (!EFI_ERROR(Status) && (Path[0] != L'\0')) {
-                ErrorPrint(L"Volley: DTB path override: %s\r\n", Path);
-                return Path;
-            }
-
-            FreePool(Path);
-            Path = NULL;
-        }
-    }
-
-    Path = AllocateCopyPool(sizeof(VOLLEY_DTB_ORNX_PATH), VOLLEY_DTB_ORNX_PATH);
-    return Path;
+    return AllocateCopyPool(sizeof(VOLLEY_DTB_ORNX_PATH), VOLLEY_DTB_ORNX_PATH);
 }
 
 STATIC

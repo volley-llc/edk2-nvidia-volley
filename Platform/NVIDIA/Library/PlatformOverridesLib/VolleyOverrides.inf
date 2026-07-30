@@ -31,7 +31,6 @@
   UefiDriverEntryPoint
   UefiBootManagerLib
   UefiRuntimeServicesTableLib
-  PrintLib
   DevicePathLib
   FileHandleLib
   BaseLib
@@ -40,10 +39,8 @@
 [Protocols]
   gEfiSimpleTextInProtocolGuid
   gEfiSimpleTextInputExProtocolGuid
-  gNVIDIACvmEepromProtocolGuid
 
 [Guids]
-  gEfiGlobalVariableGuid
   gNVIDIAPublicVariableGuid
   gNVIDIATokenSpaceGuid
 
