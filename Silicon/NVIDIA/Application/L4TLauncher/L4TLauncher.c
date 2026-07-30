@@ -1917,92 +1917,6 @@ ParseKeyValueFile(
 }
 
 /**
-  Callback for parsing boot_config.txt.
-
-  No keys are required: the file's presence is the "system installed" signal
-  (see VOLLEY_BOOT_CONFIG). expected_nvme_uuid is accepted and ignored so
-  configs written by older installers remain valid.
-**/
-STATIC
-EFI_STATUS
-BootConfigCallback(
-    IN  CONST CHAR8     *Key,
-    IN  CONST CHAR8     *Value,
-    IN  VOID            *Context
-)
-{
-    if (AsciiStrCmp(Key, "expected_nvme_uuid") == 0) {
-        DEBUG((DEBUG_INFO, "Volley: ignoring deprecated boot_config key: %a\n", Key));
-    } else {
-        DEBUG((DEBUG_INFO, "Volley: boot_config key: %a = %a\n", Key, Value));
-    }
-
-    return EFI_SUCCESS;
-}
-
-/**
-  Read and parse /boot_config.txt from eMMC ESP partition.
-
-  @param[in]  EspHandle   Handle to ESP partition
-  @param[out] Config      Parsed configuration
-
-  @retval EFI_SUCCESS     Configuration read and parsed successfully
-  @retval EFI_NOT_FOUND   File not found
-  @retval Other           Read or parse error
-**/
-STATIC
-EFI_STATUS
-ReadVolleyBootConfig(
-    IN  EFI_HANDLE          EspHandle,
-    OUT VOLLEY_BOOT_CONFIG  *Config
-)
-{
-    EFI_STATUS  Status;
-    VOID        *FileData = NULL;
-    UINT64      FileSize = 0;
-
-    if (Config == NULL) {
-        return EFI_INVALID_PARAMETER;
-    }
-
-    ZeroMem(Config, sizeof(VOLLEY_BOOT_CONFIG));
-    Config->Valid = FALSE;
-
-    // Read boot_config.txt from ESP
-    Status = OpenAndReadUntrustedFileToBuffer(
-        EspHandle,
-        VOLLEY_BOOT_CONFIG_PATH,
-        NULL,
-        &FileData,
-        &FileSize
-    );
-
-    if (EFI_ERROR(Status)) {
-        DEBUG((DEBUG_INFO, "Volley: boot_config.txt not found or unreadable: %r\n", Status));
-        return Status;
-    }
-
-    if (FileData == NULL || FileSize == 0) {
-        DEBUG((DEBUG_INFO, "Volley: boot_config.txt is empty\n"));
-        return EFI_NOT_FOUND;
-    }
-
-    // Parse the file. A readable, parseable boot_config.txt is itself the
-    // "system installed" signal — no specific keys are required.
-    Status = ParseKeyValueFile((CHAR8 *)FileData, (UINTN)FileSize, BootConfigCallback, Config);
-
-    FreePool(FileData);
-
-    if (EFI_ERROR(Status)) {
-        DEBUG((DEBUG_INFO, "Volley: boot_config.txt parse failed: %r\n", Status));
-        return Status;
-    }
-
-    Config->Valid = TRUE;
-    return EFI_SUCCESS;
-}
-
-/**
   Connect all PCI root bridges to enumerate PCI devices including NVMe.
 
   This is necessary before attempting to find NVMe devices, as they may
@@ -2557,15 +2471,16 @@ SelectBestSlot(
   Determines boot mode and which partition to load kernel from.
 
   Algorithm:
-  1. Read boot_config.txt from the APP installer partition (on NVMe)
-  2. Connect PCI root bridges to enumerate NVMe devices
-  3. Find NVMe device
-  4. Read NVMe GPT DiskGUID
-  5. Compare UUIDs - if mismatch, install mode
-  6. If match, read slot metadata and select best slot
-  7. Verify selected slot's partition GUID matches expected PARTUUID
+  1. Connect PCI root bridges and find the NVMe device
+  2. Validate the filesystem, kernel, metadata, and hashes for both slots
+  3. Select the valid slot with the highest update counter
+  4. Verify the selected slot's partition GUID matches its expected PARTUUID
 
-  @param[in]  EspHandle     Handle to ESP partition (where L4TLauncher lives)
+  No separate installation marker is required. The installer publishes
+  slot_meta.txt only after every installation stage succeeds, so the absence
+  of a valid slot is the authoritative signal to boot the persistent APP
+  installer partition.
+
   @param[in]  InstallerAppHandle Handle to APP installer partition (install-mode kernel, same NVMe)
   @param[out] BootMode      Determined boot mode
   @param[out] RootFsHandle  Handle to partition to load kernel from
@@ -2575,14 +2490,12 @@ SelectBestSlot(
 STATIC
 EFI_STATUS
 VolleyDetermineBootMode(
-    IN  EFI_HANDLE          EspHandle,
     IN  EFI_HANDLE          InstallerAppHandle,
     OUT VOLLEY_BOOT_MODE    *BootMode,
     OUT EFI_HANDLE          *RootFsHandle
 )
 {
     EFI_STATUS                  Status;
-    VOLLEY_BOOT_CONFIG          BootConfig;
     EFI_BLOCK_IO_PROTOCOL       *NvmeBlockIo = NULL;
     EFI_HANDLE                  NvmeDeviceHandle = NULL;
     EFI_HANDLE                  SlotAHandle = NULL;
@@ -2599,20 +2512,10 @@ VolleyDetermineBootMode(
 
     ErrorPrint(L"Volley: Determining boot mode...\r\n");
 
-    // Step 1: Read boot_config.txt from the APP installer partition (on NVMe)
-    Status = ReadVolleyBootConfig(InstallerAppHandle, &BootConfig);
-    if (EFI_ERROR(Status) || !BootConfig.Valid) {
-        ErrorPrint(L"Volley: boot_config.txt missing or invalid\r\n");
-        ErrorPrint(L"Volley: Install mode (PARTUUID=" VOLLEY_INSTALLER_APP_PARTUUID L")\r\n");
-        *BootMode = VOLLEY_MODE_INSTALL;
-        *RootFsHandle = InstallerAppHandle;
-        return EFI_SUCCESS;
-    }
-
-    // Step 2: Connect PCI root bridges to enumerate NVMe devices
+    // Step 1: Connect PCI root bridges to enumerate NVMe devices
     ConnectPciRootBridges();
 
-    // Step 3: Find NVMe device
+    // Step 2: Find NVMe device
     Status = FindNvmeDevice(&NvmeBlockIo, &NvmeDeviceHandle);
     if (EFI_ERROR(Status)) {
         ErrorPrint(L"Volley: No NVMe device found\r\n");
@@ -2622,13 +2525,10 @@ VolleyDetermineBootMode(
         return EFI_SUCCESS;
     }
 
-    // NOTE: Xavier had steps here reading the NVMe GPT DiskGUID and comparing
-    // it against boot_config's expected_nvme_uuid — needed because its
-    // two-step flash left the NVMe unpartitioned until first-boot install.
-    // On ornx the Jetson flash step partitions the NVMe itself, so the disk
-    // is correct by construction and those steps were removed.
-
-    // Step 4: Find partition handles for slots A and B
+    // Step 3: Find and validate slot A and B. On first boot both are
+    // unformatted/unpublished, so normal slot selection below returns install
+    // mode. The installer publishes slot_meta.txt only after all payload and
+    // data-partition writes succeed.
     // Require a mountable filesystem and kernel image before reading slot_meta.txt
     Status = FindNvmePartitionByName(NvmeDeviceHandle, VOLLEY_SLOT_A_PART_NAME, &SlotAHandle);
     if (EFI_ERROR(Status)) {
@@ -2664,7 +2564,7 @@ VolleyDetermineBootMode(
         }
     }
 
-    // Step 7: Select best slot
+    // Step 4: Select best slot
     Status = SelectBestSlot(&SlotAMeta, &SlotBMeta, BootMode);
     if (EFI_ERROR(Status)) {
         ErrorPrint(L"Volley: Both slots invalid\r\n");
@@ -2674,7 +2574,7 @@ VolleyDetermineBootMode(
         return EFI_SUCCESS;
     }
 
-    // Step 8: Verify partition GUID matches expected PARTUUID
+    // Step 5: Verify partition GUID matches expected PARTUUID
     if (*BootMode == VOLLEY_MODE_SLOT_A) {
         SelectedHandle = SlotAHandle;
         StrToGuid(VOLLEY_NVME_SLOT_A_PARTUUID, &ExpectedGuid);
@@ -2901,7 +2801,7 @@ ProcessExtLinuxConfig (
   ErrorPrint (L"Volley: Found APP installer partition\r\n");
   PrintPartitionUuid (InstallerAppHandle);
 
-  Status = VolleyDetermineBootMode (DeviceHandle, InstallerAppHandle, &BootMode, RootFsHandle);
+  Status = VolleyDetermineBootMode (InstallerAppHandle, &BootMode, RootFsHandle);
   if (EFI_ERROR (Status)) {
     ErrorPrint (L"Volley: Boot mode detection failed: %r - falling back to install mode\r\n", Status);
     BootMode      = VOLLEY_MODE_INSTALL;

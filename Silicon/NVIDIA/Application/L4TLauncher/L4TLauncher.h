@@ -69,20 +69,6 @@ typedef enum {
     VOLLEY_MODE_SLOT_B,     // Boot from slot partition VOLLEY_B
 } VOLLEY_BOOT_MODE;
 
-//
-// Parsed boot_config.txt from the ESP
-//
-// Presence of a readable boot_config.txt is the "system installed" signal.
-// Xavier additionally carried expected_nvme_uuid (GPT DiskGUID) because its
-// two-step flash (eMMC first, NVMe partitioned by the installer on first
-// boot) had to detect an unprepared NVMe. On ornx the Jetson flash step
-// partitions the NVMe itself, so the disk is correct by construction and the
-// UUID check was dropped.
-//
-typedef struct {
-    BOOLEAN     Valid;              // TRUE if config was successfully parsed
-} VOLLEY_BOOT_CONFIG;
-
 // Slot verification limits
 #define VOLLEY_MAX_CHECKS           16
 #define VOLLEY_MAX_CHECK_PATH_CHARS 256
@@ -103,9 +89,8 @@ typedef struct {
 } VOLLEY_SLOT_META;
 
 //
-// Volley boot configuration file paths and partition UUIDs
+// Volley slot metadata path and partition UUIDs
 //
-#define VOLLEY_BOOT_CONFIG_PATH     L"boot_config.txt"
 #define VOLLEY_SLOT_META_PATH       L"slot_meta.txt"
 
 // Fixed PARTUUIDs for boot cmdline — must match unique_guid values in
